@@ -1,0 +1,9 @@
+.vscode/**
+test/**
+**/*.map
+.gitignore
+
+# Surum ciktilari pakete girmesin: kaynak arsivi eklentinin icinde
+# tasinmamali, yoksa her surum bir oncekini de tasir.
+*.vsix
+*-kaynak.zip

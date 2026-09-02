@@ -1,0 +1,274 @@
+{
+  "name": "buildbar",
+  "displayName": "BuildBar",
+  "description": "Aktif projenin tasks.json gorevlerini ve launch.json yapilandirmalarini kalici butonlarda gosterir",
+  "version": "0.3.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Derleme komutlari calistirildigi icin guvenilir workspace gerekir."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "buildbar.build",
+        "title": "Aktif projeyi derle",
+        "category": "BuildBar",
+        "icon": "$(play)"
+      },
+      {
+        "command": "buildbar.debugStart",
+        "title": "Secili yapilandirmayla hata ayiklamayi baslat",
+        "category": "BuildBar",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "buildbar.pickTask",
+        "title": "Secenek sec (gorev / yapilandirma)",
+        "category": "BuildBar",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "buildbar.pickProject",
+        "title": "Aktif projeyi sec",
+        "category": "BuildBar",
+        "icon": "$(folder-library)"
+      },
+      {
+        "command": "buildbar.refresh",
+        "title": "Listeyi yenile",
+        "category": "BuildBar",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "buildbar.buildNode",
+        "title": "Bu gorevi derle",
+        "icon": "$(play)"
+      },
+      {
+        "command": "buildbar.debugNode",
+        "title": "Bu yapilandirmayi baslat",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "buildbar.buildFromExplorer",
+        "title": "Derle / baslat",
+        "icon": "$(play)"
+      },
+      {
+        "command": "buildbar.pickTaskFromExplorer",
+        "title": "Secenek sec...",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "buildbar.setActiveFromExplorer",
+        "title": "Aktif proje yap",
+        "icon": "$(folder-library)"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "buildbar.explorerMenu",
+        "label": "BuildBar",
+        "icon": "$(play)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "buildbar.build",
+          "group": "navigation@-101",
+          "when": "buildbar.hasProject && !buildbar.isLaunch"
+        },
+        {
+          "command": "buildbar.debugStart",
+          "group": "navigation@-101",
+          "when": "buildbar.hasProject && buildbar.isLaunch"
+        },
+        {
+          "command": "buildbar.pickTask",
+          "group": "navigation@-100",
+          "when": "buildbar.hasProject"
+        }
+      ],
+      "explorer/context": [
+        {
+          "submenu": "buildbar.explorerMenu",
+          "group": "2_workspace@99",
+          "when": "resourceScheme == file"
+        }
+      ],
+      "buildbar.explorerMenu": [
+        {
+          "command": "buildbar.buildFromExplorer",
+          "group": "1_run@1"
+        },
+        {
+          "command": "buildbar.pickTaskFromExplorer",
+          "group": "1_run@2"
+        },
+        {
+          "command": "buildbar.setActiveFromExplorer",
+          "group": "2_state@1"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "buildbar.build",
+          "when": "view == buildbar.projects && buildbar.hasProject && !buildbar.isLaunch",
+          "group": "navigation@1"
+        },
+        {
+          "command": "buildbar.debugStart",
+          "when": "view == buildbar.projects && buildbar.hasProject && buildbar.isLaunch",
+          "group": "navigation@1"
+        },
+        {
+          "command": "buildbar.refresh",
+          "when": "view == buildbar.projects",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "buildbar.buildNode",
+          "when": "view == buildbar.projects && viewItem == buildbar.option.task",
+          "group": "inline"
+        },
+        {
+          "command": "buildbar.debugNode",
+          "when": "view == buildbar.projects && viewItem == buildbar.option.launch",
+          "group": "inline"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "buildbar.debugStart",
+          "when": "false"
+        },
+        {
+          "command": "buildbar.buildNode",
+          "when": "false"
+        },
+        {
+          "command": "buildbar.debugNode",
+          "when": "false"
+        },
+        {
+          "command": "buildbar.buildFromExplorer",
+          "when": "false"
+        },
+        {
+          "command": "buildbar.pickTaskFromExplorer",
+          "when": "false"
+        },
+        {
+          "command": "buildbar.setActiveFromExplorer",
+          "when": "false"
+        }
+      ]
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "buildbar.projects",
+          "name": "BuildBar",
+          "icon": "$(play)"
+        }
+      ]
+    },
+    "taskDefinitions": [
+      {
+        "type": "buildbar",
+        "required": [
+          "task"
+        ],
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "tasks.json icindeki gorev etiketi ya da CMake build preset adi"
+          },
+          "project": {
+            "type": "string",
+            "description": "Workspace klasorunun adi"
+          }
+        }
+      }
+    ],
+    "configuration": {
+      "title": "BuildBar",
+      "properties": {
+        "buildbar.source": {
+          "type": "string",
+          "enum": [
+            "tasks",
+            "launch",
+            "both"
+          ],
+          "enumDescriptions": [
+            "Yalnizca tasks.json icindeki gorevler (tasks.json yoksa CMakePresets.json)",
+            "Yalnizca launch.json icindeki hata ayiklama yapilandirmalari",
+            "Ikisi birlikte: once gorevler, sonra yapilandirmalar"
+          ],
+          "default": "tasks",
+          "scope": "resource",
+          "description": "Secenek listesinin hangi dosyadan gelecegi. Resource kapsaminda oldugu icin her proje kendi .vscode/settings.json dosyasinda ayri deger verebilir."
+        },
+        "buildbar.followActiveEditor": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Aktif editor degistiginde aktif projeyi otomatik guncelle. Kapaliysa proje yalnizca elle secilir."
+        },
+        "buildbar.tasksFile": {
+          "type": "string",
+          "default": ".vscode/tasks.json",
+          "scope": "resource",
+          "description": "Proje kokune gore gorev dosyasinin yolu."
+        },
+        "buildbar.launchFile": {
+          "type": "string",
+          "default": ".vscode/launch.json",
+          "scope": "resource",
+          "description": "Proje kokune gore hata ayiklama yapilandirmalari dosyasinin yolu."
+        },
+        "buildbar.onlyBuildGroup": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Yalnizca \"group\": \"build\" olan gorevleri listele. Kapaliysa tasks.json icindeki butun gorevler gosterilir. launch.json yapilandirmalarini etkilemez."
+        },
+        "buildbar.cmakeFallback": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "tasks.json yoksa CMakePresets.json icindeki buildPresets kullanilsin."
+        },
+        "buildbar.problemMatchers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "$gcc"
+          ],
+          "scope": "resource",
+          "description": "Gorev kendi problemMatcher'ini vermediginde kullanilacak matcher listesi."
+        }
+      }
+    }
+  }
+}
