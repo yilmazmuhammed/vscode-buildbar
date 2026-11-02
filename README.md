@@ -174,7 +174,7 @@ code buildbar/
 node test/smoke.js
 
 # .vsix paketi
-npx --yes @vscode/vsce package --allow-missing-repository --skip-license
+npx --yes @vscode/vsce package
 ```
 
 Surum gecmisi `CHANGELOG.md` dosyasinda; kaynak git ile izleniyor. Surum

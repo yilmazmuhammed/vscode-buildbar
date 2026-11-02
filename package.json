@@ -3,8 +3,21 @@
   "displayName": "BuildBar",
   "description": "Aktif projenin tasks.json gorevlerini ve launch.json yapilandirmalarini kalici butonlarda gosterir",
   "version": "0.3.0",
-  "publisher": "local",
+  "publisher": "myilmaz",
+  "author": {
+    "name": "Muhammed Yilmaz",
+    "email": "yilmazmu15@itu.edu.tr"
+  },
   "license": "MIT",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yilmazmuhammed/vscode-buildbar.git"
+  },
+  "homepage": "https://github.com/yilmazmuhammed/vscode-buildbar#readme",
+  "bugs": {
+    "url": "https://github.com/yilmazmuhammed/vscode-buildbar/issues"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },

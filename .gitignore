@@ -1,2 +1,5 @@
 node_modules/
 *.vsix
+
+# Surum ciktilari: kaynak artik git ile izleniyor, arsiv tutulmuyor.
+*-kaynak.zip
