@@ -1,0 +1,33 @@
+{
+  "folders": [
+    {
+      "name": "proje-a (script)",
+      "path": "proje-a"
+    },
+    {
+      "name": "proje-b (cmake)",
+      "path": "proje-b"
+    },
+    {
+      "name": "proje-c (make)",
+      "path": "proje-c"
+    },
+    {
+      "name": "dokuman",
+      "path": "dokuman"
+    }
+  ],
+  "settings": {
+    "buildbar.followActiveEditor": true,
+    "buildbar.source": "tasks",
+    "task.quickOpen.detail": true,
+    "files.associations": {
+      "*.code-workspace": "jsonc"
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-vscode.cpptools"
+    ]
+  }
+}

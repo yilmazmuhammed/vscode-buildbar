@@ -1,6 +1,7 @@
 .vscode/**
 .github/**
 test/**
+ornek-workspace/**
 **/*.map
 .gitignore
 

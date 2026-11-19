@@ -1,0 +1,58 @@
+{
+  // Makefile projesi: gorevler dogrudan make cagirir, sarmalayici script yok.
+  // Son satirdaki fazla virgul bilerek duruyor -- tasks.json JSONC'dir ve
+  // BuildBar da onu ayni sekilde tolere eder.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "host-O0",
+      "detail": "make / hata ayiklama",
+      "type": "shell",
+      "command": "make",
+      "args": ["ARCH=host", "OPT=O0"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$gcc",
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "host-O2",
+      "detail": "make / yayin",
+      "type": "shell",
+      "command": "make",
+      "args": ["ARCH=host", "OPT=O2"],
+      "group": "build",
+      "problemMatcher": "$gcc",
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "arm-Os",
+      "detail": "make / capraz derleme",
+      "type": "shell",
+      "command": "make",
+      "args": ["ARCH=arm", "OPT=Os"],
+      "group": "build",
+      "problemMatcher": "$gcc",
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "temizle",
+      "detail": "build/ dizinini sil",
+      "type": "shell",
+      "command": "make",
+      "args": ["clean"],
+      "problemMatcher": []
+    },
+  ]
+}

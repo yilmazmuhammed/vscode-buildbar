@@ -1,0 +1,35 @@
+{
+  // BuildBar bu dosyayi "buildbar.source" ayari "launch" ya da "both" iken
+  // listeler. Secili bir yapilandirmada dugme derlemez, hata ayiklama
+  // oturumu baslatir; asagidaki preLaunchTask sayesinde derlemeyi VS Code
+  // kendisi zincirler (tasks.json icindeki ayni isimli gorev).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "host-debug calistir",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/host-debug/demo",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "preLaunchTask": "host-debug"
+    },
+    {
+      "name": "host-release calistir",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/host-release/demo",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "preLaunchTask": "host-release"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "ikisi birden",
+      "configurations": ["host-debug calistir", "host-release calistir"]
+    }
+  ]
+}

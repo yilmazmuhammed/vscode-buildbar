@@ -253,7 +253,7 @@ require.cache['vscode'] = { id: 'vscode', filename: 'vscode', loaded: true, expo
 
 // --------------------------------------------------------------- kurulum
 
-const wsRoot = path.resolve(__dirname, '../../ornek-workspace');
+const wsRoot = path.resolve(__dirname, '../ornek-workspace');
 
 /**
  * Yalnizca VS Code'un cozebilecegi ${input:...} degiskeni iceren gecici bir

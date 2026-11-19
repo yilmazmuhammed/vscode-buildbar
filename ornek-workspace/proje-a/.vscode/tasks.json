@@ -1,0 +1,71 @@
+{
+  // BuildBar bu dosyayi okur: her "label" ust sagdaki listede bir secenek olur.
+  // Ekstra bir dosya yok -- ayni gorevler Ctrl+Shift+B ve
+  // "Terminal > Run Task" ile de calisir. Yorum satirlari da desteklenir.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "host-debug",
+      "detail": "cc -O0 -g",
+      "type": "shell",
+      "command": "./build.sh",
+      "args": ["--config", "host-debug"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$gcc",
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "host-release",
+      "detail": "cc -O2 -DNDEBUG",
+      "type": "shell",
+      "command": "./build.sh",
+      "args": ["--config", "host-release"],
+      "group": "build",
+      "problemMatcher": "$gcc",
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "arm-debug",
+      "detail": "arm-linux-gnueabihf-gcc -O0 -g",
+      "type": "shell",
+      "command": "./build.sh",
+      "args": ["--config", "arm-debug"],
+      "group": "build",
+      "problemMatcher": "$gcc",
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "arm-release",
+      "detail": "arm-linux-gnueabihf-gcc -Os",
+      "type": "shell",
+      "command": "./build.sh",
+      "args": ["--config", "arm-release"],
+      "group": "build",
+      "problemMatcher": "$gcc",
+      "presentation": {
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "temizle",
+      "detail": "build/ dizinini sil",
+      "type": "shell",
+      "command": "./build.sh",
+      "args": ["--clean"],
+      "problemMatcher": []
+    }
+  ]
+}

@@ -7,7 +7,7 @@
       "request": "launch",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/../ornek-workspace/demo.code-workspace"
+        "${workspaceFolder}/ornek-workspace/demo.code-workspace"
       ]
     }
   ]
