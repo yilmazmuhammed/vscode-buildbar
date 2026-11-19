@@ -167,18 +167,36 @@ Oturum baslamazsa (ornegin yapilandirma gecersizse) uyari gosterilir.
 ## Gelistirme
 
 ```bash
-# Bagimlilik yok, derleme adimi yok. Klasoru VS Code'da acip F5.
+# Calisma zamani bagimliligi yok, derleme adimi yok. Klasoru VS Code'da acip F5.
 code buildbar/
 
 # Duman testi (VS Code olmadan, sahte vscode modulu ile)
-node test/smoke.js
+npm test
 
-# .vsix paketi
-npx --yes @vscode/vsce package
+# .vsix paketi (vsce devDependency olarak kurulu)
+npm ci
+npx vsce package
 ```
 
 Surum gecmisi `CHANGELOG.md` dosyasinda; kaynak git ile izleniyor. Surum
 cikarma yordami CLAUDE.md icindeki "Surum cikarma yordami" bolumunde.
+
+## Yayinlama
+
+`main` dalina yapilan her push'ta `.github/workflows/publish.yml` calisir:
+`npm ci`, duman testi (`npm test`), sonra `package.json` icindeki surum
+Marketplace'teki surumle karsilastirilir. Surum farkliysa eklenti
+`vsce publish --oidc` ile yayinlanir; ayniysa hicbir sey yayinlanmaz. Is
+akisi Actions sekmesinden elle de (`workflow_dispatch`) baslatilabilir.
+
+Yayin Trusted Publishing (OIDC) ile yapilir; depoda erisim anahtari (PAT)
+tutulmaz. Bunun icin `myilmaz` yayinci sayfasinda bu depoyu ve
+`publish.yml` is akisini adlandiran bir Trusted Publishing politikasi tanimli
+olmali. `--oidc` bayragi `@vscode/vsce` 4.1.1 ve sonrasinda var; bu yuzden
+vsce `devDependencies` icinde.
+
+Yeni surum icin `version` alanini yukseltip `CHANGELOG.md` girdisini yazmak ve
+`main`'e push etmek yeterli.
 
 ## Bilinen sinirlar
 
