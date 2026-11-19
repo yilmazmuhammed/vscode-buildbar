@@ -9,6 +9,22 @@ kaynak arsivi (`-kaynak.zip`) de konuyordu, git'e gecisle birakildi.
 > extension host eski kodu tutmaya devam eder, ayar tanimlari ise yeni
 > surumden gelir; bu karisik durum tuhaf hatalara yol acar.
 
+## 0.3.1 — 2026-11-19
+
+Eklentinin davranisi degismedi; bu surum Marketplace yayinini
+otomatiklestiriyor.
+
+**Degisti**
+
+- Marketplace yayini artik GitHub Actions ile yapiliyor: `main`'e gelen ve
+  surumu Marketplace'te olmayan her push, duman testi gectikten sonra
+  Trusted Publishing (OIDC) ile yayinlaniyor. Erisim anahtari (PAT)
+  kullanilmiyor.
+- README'ye "Yayinlama" bolumu eklendi. Gelistirme komutlari `npm test` ve
+  `npm ci` + `npx vsce package` oldu; `@vscode/vsce` artik devDependency.
+- Ornek workspace (`ornek-workspace/`) depoya alindi; duman testi ve F5 onu
+  depo icinden okuyor. Pakete girmiyor.
+
 ## 0.3.0 — 2026-09-02
 
 Ikinci kaynak: `launch.json`. Liste artik gorevlerden ya da hata ayiklama
