@@ -9,11 +9,10 @@ kaynak arsivi (`-kaynak.zip`) de konuyordu, git'e gecisle birakildi.
 > extension host eski kodu tutmaya devam eder, ayar tanimlari ise yeni
 > surumden gelir; bu karisik durum tuhaf hatalara yol acar.
 
-## Yayinlanmamis
+## 0.4.0 — 2026-11-20
 
 Eclipse CDT arac cubugu davranisina yaklasma: derleme durumu ve durdur,
-sonuc satiri, tek adimda sec ve derle, coklu proje derleme, temizle. Surum
-numarasi surum cikarilirken verilecek.
+sonuc satiri, tek adimda sec ve derle, coklu proje derleme, temizle.
 
 **Eklendi**
 
