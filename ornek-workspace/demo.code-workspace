@@ -20,6 +20,7 @@
   "settings": {
     "buildbar.followActiveEditor": true,
     "buildbar.source": "tasks",
+    "buildbar.cleanTask": "temizle",
     "task.quickOpen.detail": true,
     "files.associations": {
       "*.code-workspace": "jsonc"

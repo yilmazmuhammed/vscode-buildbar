@@ -9,6 +9,61 @@ kaynak arsivi (`-kaynak.zip`) de konuyordu, git'e gecisle birakildi.
 > extension host eski kodu tutmaya devam eder, ayar tanimlari ise yeni
 > surumden gelir; bu karisik durum tuhaf hatalara yol acar.
 
+## Yayinlanmamis
+
+Eclipse CDT arac cubugu davranisina yaklasma: derleme durumu ve durdur,
+sonuc satiri, tek adimda sec ve derle, coklu proje derleme, temizle. Surum
+numarasi surum cikarilirken verilecek.
+
+**Eklendi**
+
+- **Derleme durumu ve durdur.** Projenin bir secenegi kosarken status bar'daki
+  derle ogesi `$(sync~spin)` ile doner, agacta proje `(derleniyor)` yazar ve
+  yanina `$(debug-stop)` durdur dugmesi gelir (editor baslik cubugunda ve agac
+  basliginda da, `buildbar.isRunning` baglam anahtariyla). Ctrl+Shift+B ya da
+  Run Task ile baslatilan ayni gorevler de izlenir. Sebep: Eclipse'te derleme
+  ilerleme gostergesinden ya da Launch Bar'daki Stop'tan iptal edilebiliyordu;
+  BuildBar derlemenin surdugunu hic gostermiyordu.
+- **Derleme surerken yeniden derle sorusu**: "Durdur / Yeniden baslat".
+  Ayni gorevin ust uste baslamasini ve cift tiklamanin derlemeyi kazara
+  durdurmasini onler.
+- **Sonuc satiri.** Derleme bitince status bar'da birkac saniye
+  `proje / gorev tamam (4,1 sn)` ya da `basarisiz (cikis 2)` ve projedeki
+  Problems sayisi gorunur. Son derleme basarisizsa derle ogesinin arka plani
+  kirmizi kalir. Sebep: Eclipse konsolundaki "Build Finished. N errors" satiri
+  gibi, basarinin bir bakista gorunmesi.
+- **Sec ve derle.** `☰` listesinde her satirin sonunda `$(play)` (launch
+  yapilandirmasinda `$(debug-alt)`) dugmesi: secer ve hemen derler. Enter
+  eskisi gibi yalnizca secer. Klavye icin **Sec ve derle...** komutu
+  (`buildbar.pickAndBuild`), Explorer alt menusunde de var. Sebep: Eclipse'te
+  cekicin acilir okundan yapilandirma secmek onu derliyordu.
+- **Explorer'da coklu secimle derleme.** Birden fazla proje seciliyse hepsi
+  sirayla derlenir, sonunda ozet bildirimi gelir. Onceden yalnizca ilk proje
+  derleniyordu.
+- **Temizle / Temizle ve derle** (`buildbar.clean`, `buildbar.cleanBuild`)
+  ve `buildbar.cleanTask` ayari. Ayarda adi verilen `tasks.json` gorevi
+  secenek listesinden cikar; CMakePresets projelerinde
+  `cmake --build --preset X --target clean` kosar. Temizlik basarisizsa
+  derleme yapilmaz. Sebep: Eclipse'teki Project > Clean; onceden temizlik
+  siradan bir secenekti ve onu calistirmak aktif secimi degistiriyordu.
+- README'ye "Eclipse karsiligi" tablosu.
+- Ornek workspace'te `buildbar.cleanTask: "temizle"`.
+
+**Degisti**
+
+- `☰` listesi `showQuickPick` yerine `createQuickPick` ile kuruluyor (satir
+  dugmeleri icin). Acildiginda secili satir vurgulu geliyor.
+- Agactaki inline `▶` ve Explorer'dan derleme de "derleniyor" sorusundan
+  geciyor.
+
+**Duzeltildi**
+
+- `source: both` modunda ayni adi tasiyan bir gorev ile bir launch
+  yapilandirmasi agacta ayni dugume dusuyordu (dugum onbellegi yalnizca adi
+  anahtar aliyordu, turu degil); agac iki satirdan birini kaybediyor ve
+  VS Code "already registered" hatasi verebiliyordu. Onbellek artik `tur:ad`
+  anahtarini kullaniyor.
+
 ## 0.3.1 — 2026-11-19
 
 Eklentinin davranisi degismedi; bu surum Marketplace yayinini

@@ -15,6 +15,9 @@ let bar;
 /** @type {vscode.StatusBarItem} Secili gorevi gosteren buton. */
 let taskBar;
 
+/** @type {vscode.StatusBarItem} Yalnizca derleme surerken gorunen durdur butonu. */
+let stopBar;
+
 /** @type {vscode.TreeView<Node>} */
 let view;
 
@@ -40,6 +43,36 @@ const optionsCache = new Map();
  */
 const realTasks = new Map();
 
+/**
+ * Su an kosan derlemeler.
+ * folderUri -> Map<vscode.TaskExecution, {name, started, folder}>
+ * Yalnizca projenin kendi secenekleri (ve temizlik gorevi) izlenir; boylece
+ * Ctrl+Shift+B ile baslatilan ayni gorev de gorunur, ama izleme (watch) gibi
+ * ilgisiz gorevler durdur dugmesini acik birakmaz.
+ */
+const running = new Map();
+
+/** Proje basina son derleme sonucu. folderUri -> BuildResult */
+const lastResult = new Map();
+
+/** onDidEndTaskProcess'ten gelen cikis kodlari. */
+const exitCodes = new WeakMap();
+
+/** Kullanicinin durdurdugu kosular; sonuc "durduruldu" yazilsin diye. */
+const stoppedRuns = new WeakSet();
+
+/** Bitisini bekleyenler. TaskExecution -> resolve fonksiyonlari */
+const waiters = new Map();
+
+/** Bekleyen kaydolmadan biten kosular (cok hizli gorevler). */
+const endedEarly = new WeakMap();
+
+/**
+ * Ardisik is kuyrugu (coklu proje, temizle ve derle). Ayni anda tek kuyruk.
+ * @type {{cancelled: boolean} | undefined}
+ */
+let queue;
+
 const treeChanged = new vscode.EventEmitter();
 
 /**
@@ -47,7 +80,10 @@ const treeChanged = new vscode.EventEmitter();
  *         | {kind: 'option', folder: vscode.WorkspaceFolder, opt: BuildOption}} Node
  * @typedef {{ kind: 'task' | 'launch', name: string, detail?: string,
  *             isDefault?: boolean, entry?: object, cmake?: boolean,
- *             configure?: boolean }} BuildOption
+ *             configure?: boolean, clean?: boolean, preset?: string }} BuildOption
+ * @typedef {{ name?: string, exitCode?: number, ms?: number,
+ *             stopped?: boolean, error?: string, delegated?: boolean,
+ *             execution?: object }} BuildResult
  */
 
 const settings = (folder) =>
@@ -67,7 +103,8 @@ const DEFAULTS = {
   launchFile: '.vscode/launch.json',
   onlyBuildGroup: false,
   cmakeFallback: true,
-  problemMatchers: ['$gcc']
+  problemMatchers: ['$gcc'],
+  cleanTask: ''
 };
 
 /**
@@ -230,23 +267,32 @@ function commandLineOf(entry) {
   return line.length > 60 ? `${line.slice(0, 57)}...` : line;
 }
 
-/** tasks.json icindeki gorevler. */
-function taskOptions(folder) {
+/** tasks.json'daki ham gorev girdileri. */
+function taskEntries(folder) {
   const file = readJsonc(path.join(folder.uri.fsPath, pref(folder, 'tasksFile')));
   const entries = file && Array.isArray(file.tasks) ? file.tasks : [];
+  return entries.filter((entry) => entry && typeof entry === 'object');
+}
+
+/** Gorevin adi: label (2.0.0) ya da taskName (eski surum). */
+const labelOf = (entry) =>
+  typeof entry.label === 'string'
+    ? entry.label
+    : typeof entry.taskName === 'string'
+      ? entry.taskName
+      : undefined;
+
+/** tasks.json icindeki gorevler. */
+function taskOptions(folder) {
   const onlyBuild = pref(folder, 'onlyBuildGroup');
+  // Temizlik gorevi bir yapilandirma degil; Temizle komutu onu ayrica kosar.
+  const cleanName = pref(folder, 'cleanTask');
 
   const list = [];
-  for (const entry of entries) {
-    if (!entry || typeof entry !== 'object') continue;
-
-    const name =
-      typeof entry.label === 'string'
-        ? entry.label
-        : typeof entry.taskName === 'string'
-          ? entry.taskName
-          : undefined;
+  for (const entry of taskEntries(folder)) {
+    const name = labelOf(entry);
     if (!name) continue;
+    if (cleanName && name === cleanName) continue;
     if (onlyBuild && groupKind(entry) !== 'build') continue;
 
     list.push({
@@ -388,6 +434,43 @@ function optionsFor(folder) {
 const isBuildable = (folder) => !!folder && optionsFor(folder).length > 0;
 
 /**
+ * Projenin temizlik gorevi. Once buildbar.cleanTask ayarindaki tasks.json
+ * etiketi aranir; proje secenekleri CMakePresets'ten geliyorsa secili
+ * preset'in clean hedefi uretilir. Ikisi de yoksa undefined.
+ *
+ * @param {vscode.WorkspaceFolder} folder
+ * @returns {BuildOption | undefined}
+ */
+function cleanOption(folder) {
+  const name = pref(folder, 'cleanTask');
+  if (name) {
+    const entry = taskEntries(folder).find((e) => labelOf(e) === name);
+    if (entry) {
+      return {
+        kind: 'task',
+        name,
+        entry,
+        clean: true,
+        detail: typeof entry.detail === 'string' ? entry.detail : commandLineOf(entry)
+      };
+    }
+  }
+
+  const current = currentOption(folder);
+  if (current && current.cmake) {
+    return {
+      kind: 'task',
+      name: `${current.name} (temizle)`,
+      cmake: true,
+      clean: true,
+      preset: current.name,
+      detail: 'cmake --target clean'
+    };
+  }
+  return undefined;
+}
+
+/**
  * Secimi kaydeder. Ayni gorev adi pencere yeniden yuklendiginde de secili
  * kalsin diye workspaceState'e yazilir.
  */
@@ -460,6 +543,11 @@ function executionFor(folder, opt) {
 
   // CMakePresets'ten gelen secenek: komutu biz uretiyoruz.
   if (opt.cmake) {
+    if (opt.clean) {
+      return new vscode.ShellExecution(`cmake --build --preset ${opt.preset} --target clean`, {
+        cwd
+      });
+    }
     const build = `cmake --build --preset ${opt.name}`;
     return new vscode.ShellExecution(
       opt.configure ? `cmake --preset ${opt.name} && ${build}` : build,
@@ -527,13 +615,17 @@ function synthesize(folder, opt) {
     showReuseMessage: false,
     echo: true
   };
-  task.group = vscode.TaskGroup.Build;
+  task.group = (opt.clean && vscode.TaskGroup.Clean) || vscode.TaskGroup.Build;
   return task;
 }
 
 /**
+ * Secenegi kosar. Gorev kostuysa TaskExecution doner; hata ayiklama oturumu
+ * ya da gorev sistemine devredilen islerde undefined.
+ *
  * @param {vscode.WorkspaceFolder} folder
  * @param {BuildOption} opt
+ * @returns {Promise<vscode.TaskExecution | undefined>}
  */
 async function runOption(folder, opt) {
   // Hata ayiklama yapilandirmasi: derleme yok, oturum baslatilir. Ad klasor
@@ -554,16 +646,319 @@ async function runOption(folder, opt) {
   // 1) tasks.json'daki gorevin VS Code tarafindan cozulmus hali.
   const known = realTasks.get(folder.uri.toString());
   const real = opt.entry && known ? known.get(opt.name) : undefined;
-  if (real) return void (await vscode.tasks.executeTask(real));
+  if (real) return vscode.tasks.executeTask(real);
 
   // 2) Cozulmus hali yoksa (CMake preset, henuz taranmamis dosya...)
   //    gorevi kendimiz kurariz.
   const task = synthesize(folder, opt);
-  if (task) return void (await vscode.tasks.executeTask(task));
+  if (task) return vscode.tasks.executeTask(task);
 
   // 3) Icinde ${input:...} gibi yalnizca VS Code'un cozebilecegi degisken
-  //    var; gorev sistemine devret.
+  //    var; gorev sistemine devret. Kosu onDidStartTask ile yine izlenir,
+  //    ama bitisi beklenemez.
   await vscode.commands.executeCommand('workbench.action.tasks.runTask', opt.name);
+  return undefined;
+}
+
+// ------------------------------------------------- derleme durumu ve sonuc
+
+/** Gorevin ait oldugu workspace klasoru (yalnizca klasor kapsamli gorevler). */
+function folderOfTask(task) {
+  const scope = task && task.scope;
+  if (!scope || typeof scope !== 'object' || !scope.uri) return undefined;
+  const key = scope.uri.toString();
+  return (vscode.workspace.workspaceFolders || []).find((f) => f.uri.toString() === key);
+}
+
+/** Bu gorev bir derleme mi? Projenin secenegi, temizlik gorevi ya da bizim sentezimiz. */
+function isTracked(folder, task) {
+  if (task.definition && task.definition.type === 'buildbar') return true;
+  const cleanName = pref(folder, 'cleanTask');
+  if (cleanName && task.name === cleanName) return true;
+  return optionsFor(folder).some((o) => !isLaunch(o) && o.name === task.name);
+}
+
+const isBuilding = (folder) => !!folder && running.has(folder.uri.toString());
+
+/** Izlenen butun kosular: [{execution, name, started, folder}] */
+function runningList() {
+  const list = [];
+  for (const execs of running.values()) {
+    for (const [execution, info] of execs) list.push(Object.assign({ execution }, info));
+  }
+  return list;
+}
+
+const anyRunning = () => running.size > 0 || !!queue;
+
+function onTaskStarted(e) {
+  const execution = e && e.execution;
+  const task = execution && execution.task;
+  const folder = folderOfTask(task);
+  if (!folder || !isTracked(folder, task)) return;
+
+  endedEarly.delete(execution);
+  const key = folder.uri.toString();
+  if (!running.has(key)) running.set(key, new Map());
+  running.get(key).set(execution, { name: task.name, started: Date.now(), folder });
+  render();
+}
+
+function onTaskProcessEnded(e) {
+  const execution = e && e.execution;
+  if (!execution) return;
+  exitCodes.set(execution, e.exitCode);
+
+  // Normalde surec bitisi gorev bitisinden once gelir. Tersi olduysa sonucu
+  // sonradan duzelt.
+  for (const result of lastResult.values()) {
+    if (result.execution === execution && result.exitCode === undefined) {
+      result.exitCode = e.exitCode;
+      render();
+    }
+  }
+}
+
+function onTaskEnded(e) {
+  const execution = e && e.execution;
+  if (!execution) return;
+
+  let result;
+  for (const [key, execs] of running) {
+    const info = execs.get(execution);
+    if (!info) continue;
+    execs.delete(execution);
+    if (!execs.size) running.delete(key);
+
+    result = {
+      name: info.name,
+      exitCode: exitCodes.get(execution),
+      ms: Date.now() - info.started,
+      stopped: stoppedRuns.has(execution),
+      execution
+    };
+    lastResult.set(key, result);
+    announce(info.folder, result);
+    render();
+    break;
+  }
+
+  if (!result) result = { exitCode: exitCodes.get(execution), stopped: stoppedRuns.has(execution) };
+  const list = waiters.get(execution);
+  if (list) {
+    waiters.delete(execution);
+    list.forEach((resolve) => resolve(result));
+  } else {
+    endedEarly.set(execution, result);
+  }
+}
+
+/**
+ * Kosunun bitmesini bekler.
+ * @returns {Promise<BuildResult>}
+ */
+function whenEnded(execution) {
+  if (endedEarly.has(execution)) {
+    const result = endedEarly.get(execution);
+    endedEarly.delete(execution);
+    return Promise.resolve(result);
+  }
+  return new Promise((resolve) => {
+    if (!waiters.has(execution)) waiters.set(execution, []);
+    waiters.get(execution).push(resolve);
+  });
+}
+
+/**
+ * Secenegi kosar ve bitmesini bekler. Hata ayiklama oturumu ya da gorev
+ * sistemine devredilen islerde beklenecek bir sey yok.
+ * @returns {Promise<BuildResult>}
+ */
+async function runAndWait(folder, opt) {
+  let execution;
+  try {
+    execution = await runOption(folder, opt);
+  } catch (err) {
+    return { name: opt.name, error: (err && err.message) || String(err) };
+  }
+  if (!execution || typeof execution !== 'object') return { name: opt.name, delegated: true };
+  return whenEnded(execution);
+}
+
+/** Basarisiz sayilir mi? Cikis kodu bilinmiyorsa basarisiz denmez. */
+const failed = (r) =>
+  !!r && (!!r.error || (!r.stopped && typeof r.exitCode === 'number' && r.exitCode !== 0));
+
+/** Bir sonraki adima gecmek icin yeterince iyi mi? */
+const succeeded = (r) => !!r && !r.stopped && !failed(r);
+
+/** Sonucu kisa metne cevirir: [ikon, durum]. */
+function statusOf(r) {
+  if (r.error) return ['$(error)', `hata: ${r.error}`];
+  if (r.stopped) return ['$(debug-stop)', 'durduruldu'];
+  if (r.delegated) return ['$(info)', 'gorev sistemine devredildi'];
+  if (typeof r.exitCode !== 'number') return ['$(info)', 'bitti'];
+  if (r.exitCode === 0) return ['$(check)', 'tamam'];
+  return ['$(error)', `basarisiz (cikis ${r.exitCode})`];
+}
+
+const seconds = (ms) => `${(ms / 1000).toFixed(1).replace('.', ',')} sn`;
+
+/**
+ * Projedeki Problems sayisi. Derleyici hatalarinin yaninda dil sunucusunun
+ * (IntelliSense) bildirdikleri de sayilir; Eclipse'in Problems gorunumu de
+ * Codan bulgularini ayni sekilde karistirir.
+ */
+function problemCounts(folder) {
+  let all;
+  try {
+    all = vscode.languages.getDiagnostics();
+  } catch (err) {
+    return undefined;
+  }
+  const key = folder.uri.toString();
+  let errors = 0;
+  let warnings = 0;
+  for (const [uri, diagnostics] of all || []) {
+    if (!uri || (uri.scheme && uri.scheme !== 'file')) continue;
+    const owner = vscode.workspace.getWorkspaceFolder(uri);
+    if (!owner || owner.uri.toString() !== key) continue;
+    for (const d of diagnostics || []) {
+      if (d.severity === vscode.DiagnosticSeverity.Error) errors++;
+      else if (d.severity === vscode.DiagnosticSeverity.Warning) warnings++;
+    }
+  }
+  return { errors, warnings };
+}
+
+function problemsText(folder) {
+  const counts = problemCounts(folder);
+  if (!counts || (!counts.errors && !counts.warnings)) return undefined;
+  return `Problems: ${counts.errors} hata, ${counts.warnings} uyari`;
+}
+
+/** Eclipse'in "Build Finished. N errors, M warnings (took ...)" satirinin karsiligi. */
+function resultLine(folder, r) {
+  const [icon, status] = statusOf(r);
+  const parts = [`${icon} BuildBar: ${folder.name} / ${r.name} ${status}`];
+  if (typeof r.ms === 'number') parts[0] += ` (${seconds(r.ms)})`;
+  const problems = problemsText(folder);
+  if (problems && !r.stopped) parts.push(problems);
+  return parts.join(' - ');
+}
+
+function announce(folder, r) {
+  vscode.window.setStatusBarMessage(resultLine(folder, r), 10000);
+}
+
+/**
+ * Kosan derlemeleri durdurur. folders verilmezse hepsi; kuyruk da iptal edilir.
+ * wait true ise kosularin bitmesi beklenir.
+ */
+async function stopRuns(folders, opts) {
+  const keys = folders ? new Set(folders.map((f) => f.uri.toString())) : undefined;
+  if (!keys && queue) queue.cancelled = true;
+
+  const targets = runningList().filter((r) => !keys || keys.has(r.folder.uri.toString()));
+  for (const r of targets) {
+    stoppedRuns.add(r.execution);
+    try {
+      r.execution.terminate();
+    } catch (err) {
+      console.warn(`buildbar: ${r.name} durdurulamadi -> ${err && err.message}`);
+    }
+  }
+  if (opts && opts.wait && targets.length) {
+    // terminate() normalde hemen biter; takilirsa sonsuza dek beklemeyelim.
+    const timeout = new Promise((resolve) => setTimeout(resolve, 15000));
+    await Promise.race([Promise.all(targets.map((r) => whenEnded(r.execution))), timeout]);
+  }
+  return targets.length;
+}
+
+/**
+ * Tek bir projede derler. Proje zaten derleniyorsa Eclipse'teki gibi sorar:
+ * durdur ya da yeniden baslat. Boylece cift tiklama derlemeyi kazara
+ * durdurmaz, ayni gorev de ust uste baslamaz.
+ */
+async function buildFolder(folder, opt) {
+  if (!isLaunch(opt) && isBuilding(folder)) {
+    const names = runningList()
+      .filter((r) => r.folder.uri.toString() === folder.uri.toString())
+      .map((r) => r.name)
+      .join(', ');
+    const choice = await vscode.window.showWarningMessage(
+      `BuildBar: ${folder.name} icinde ${names} derleniyor.`,
+      'Durdur',
+      'Yeniden baslat'
+    );
+    if (choice === 'Durdur') {
+      await stopRuns([folder]);
+      return undefined;
+    }
+    if (choice !== 'Yeniden baslat') return undefined;
+    await stopRuns([folder], { wait: true });
+  }
+  return runOption(folder, opt);
+}
+
+/**
+ * Adimlari sirayla kosar; her gorevin bitmesi beklenir. Bir adim
+ * needsPrevious tasiyorsa onceki adim basarili degilse atlanir (temizle
+ * basarisizsa derleme yapilmaz). Durdur dugmesi kuyrugu da iptal eder.
+ *
+ * @param {{folder: vscode.WorkspaceFolder, opt: BuildOption, needsPrevious?: boolean}[]} steps
+ * @returns {Promise<{step: object, result?: BuildResult, skipped?: string}[] | undefined>}
+ */
+async function runQueue(steps) {
+  if (queue) {
+    vscode.window.showWarningMessage('BuildBar: onceki sira henuz bitmedi.');
+    return undefined;
+  }
+  const busy = [...new Set(steps.filter((s) => isBuilding(s.folder)).map((s) => s.folder.name))];
+  if (busy.length) {
+    vscode.window.showWarningMessage(
+      `BuildBar: ${busy.join(', ')} icinde derleme suruyor. Bitmesini bekleyin ya da durdurun.`
+    );
+    return undefined;
+  }
+
+  const current = { cancelled: false };
+  queue = current;
+  render();
+
+  const results = [];
+  try {
+    for (const step of steps) {
+      const previous = results[results.length - 1];
+      if (current.cancelled) {
+        results.push({ step, skipped: 'iptal edildi' });
+      } else if (step.needsPrevious && previous && !succeeded(previous.result)) {
+        results.push({ step, skipped: 'onceki adim basarisiz' });
+      } else {
+        results.push({ step, result: await runAndWait(step.folder, step.opt) });
+      }
+    }
+  } finally {
+    queue = undefined;
+    render();
+  }
+  return results;
+}
+
+/** Coklu proje islerinden sonra tek bildirimde ozet. */
+function summarize(results, skipped) {
+  const lines = results.map(({ step, result, skipped: why }) => {
+    const label = `${step.folder.name} / ${step.opt.name}`;
+    return why ? `${label}: ${why}` : `${label}: ${statusOf(result)[1]}`;
+  });
+  lines.push(...skipped);
+  const bad =
+    skipped.length > 0 ||
+    results.some((r) => r.skipped || failed(r.result) || (r.result && r.result.stopped));
+  const text = `BuildBar: ${lines.join('; ')}`;
+  if (bad) vscode.window.showWarningMessage(text);
+  else vscode.window.showInformationMessage(text);
 }
 
 // ------------------------------------------------------------------- agac
@@ -575,7 +970,9 @@ const projectNode = (folder) => {
 };
 
 const optionNode = (folder, opt) => {
-  const key = `${folder.uri.toString()}::${opt.name}`;
+  // Ad tek basina yetmez: both modunda ayni adli bir gorev ve yapilandirma
+  // ayni dugum nesnesine duserdi.
+  const key = `${folder.uri.toString()}::${optionKey(opt)}`;
   if (!optionNodes.has(key)) optionNodes.set(key, { kind: 'option', folder, opt });
   const node = optionNodes.get(key);
   node.opt = opt; // icerik degismis olabilir
@@ -617,11 +1014,14 @@ const provider = {
         list.length ? 'folder-library' : 'folder',
         isActive(node.folder) ? new vscode.ThemeColor('charts.blue') : undefined
       );
-      item.description = isActive(node.folder)
-        ? '(aktif)'
-        : list.length
-          ? undefined
-          : 'secenek yok';
+      item.description =
+        [
+          isActive(node.folder) ? '(aktif)' : undefined,
+          isBuilding(node.folder) ? '(derleniyor)' : undefined,
+          list.length ? undefined : 'secenek yok'
+        ]
+          .filter(Boolean)
+          .join(' ') || undefined;
       item.tooltip = new vscode.MarkdownString(
         `**${node.folder.name}**\n\n${node.folder.uri.fsPath}\n\n` +
           (list.length
@@ -634,13 +1034,18 @@ const provider = {
     const chosen = currentOption(node.folder);
     const selected = !!chosen && optionKey(chosen) === optionKey(node.opt);
     const launch = isLaunch(node.opt);
+    const busy =
+      !launch &&
+      runningList().some(
+        (r) => r.folder.uri.toString() === node.folder.uri.toString() && r.name === node.opt.name
+      );
 
     const item = new vscode.TreeItem(node.opt.name, vscode.TreeItemCollapsibleState.None);
     item.id = `o:${node.folder.uri.toString()}::${optionKey(node.opt)}`;
     // Satir sonundaki eylem ikonu turune gore degisiyor (derle / hata ayikla).
     item.contextValue = launch ? 'buildbar.option.launch' : 'buildbar.option.task';
     item.iconPath = new vscode.ThemeIcon(
-      selected ? 'circle-filled' : 'circle-outline',
+      busy ? 'sync~spin' : selected ? 'circle-filled' : 'circle-outline',
       selected && isActive(node.folder) ? new vscode.ThemeColor('charts.blue') : undefined
     );
     // Secili olani yazi ile de isaretle: ikon farki her temada okunmuyor.
@@ -665,21 +1070,65 @@ const provider = {
 /** Workspace'te derlenebilir en az bir proje var mi? */
 const anyBuildable = () => (vscode.workspace.workspaceFolders || []).some(isBuildable);
 
+/** Aktif projenin son derlemesi icin ipucu satirlari. */
+function lastResultTooltip(folder) {
+  const r = lastResult.get(folder.uri.toString());
+  if (!r) return '';
+  const [, status] = statusOf(r);
+  let text = `\n\nSon derleme: \`${r.name}\` ${status}`;
+  if (typeof r.ms === 'number') text += `, ${seconds(r.ms)}`;
+  const problems = problemsText(folder);
+  if (problems) text += `\n\n${problems} (bu projede)`;
+  return text;
+}
+
+/** Durdur butonu: herhangi bir derleme ya da kuyruk surerken gorunur. */
+function renderStop() {
+  const list = runningList();
+  if (!list.length && !queue) {
+    stopBar.hide();
+    return;
+  }
+  stopBar.text = '$(debug-stop)';
+  stopBar.command = 'buildbar.stop';
+  stopBar.tooltip = new vscode.MarkdownString(
+    '**Derlemeyi durdur**' +
+      (list.length
+        ? `\n\n${list.map((r) => `- ${r.folder.name} / \`${r.name}\``).join('\n')}`
+        : '') +
+      (queue ? '\n\nSiradaki isler de iptal edilir.' : '')
+  );
+  stopBar.show();
+}
+
 function render() {
   const opt = active ? currentOption(active) : undefined;
+  bar.backgroundColor = undefined;
 
   if (opt) {
     const list = optionsFor(active);
     const launch = isLaunch(opt);
+    const building = isBuilding(active);
 
     // Ikon ve komut secenegin turune gore: gorev derlenir, yapilandirma
-    // hata ayiklama oturumu baslatir.
-    bar.text = `${launch ? '$(debug-alt)' : '$(play)'} ${active.name}`;
+    // hata ayiklama oturumu baslatir. Derleme surerken ikon doner; tiklamak
+    // durdurmaz, ne yapilacagini sorar (buildFolder).
+    bar.text = `${building ? '$(sync~spin)' : launch ? '$(debug-alt)' : '$(play)'} ${active.name}`;
     bar.command = launch ? 'buildbar.debugStart' : 'buildbar.build';
     bar.tooltip = new vscode.MarkdownString(
-      `${launch ? '**Hata ayiklamayi baslat**' : '**Derle**'} \`${opt.name}\`` +
-        `\n\nProje: ${active.name}`
+      (building
+        ? `**Derleniyor** \`${runningList()
+            .filter((r) => r.folder.uri.toString() === active.uri.toString())
+            .map((r) => r.name)
+            .join(', ')}\` - durdurmak icin yanindaki kare dugme`
+        : `${launch ? '**Hata ayiklamayi baslat**' : '**Derle**'} \`${opt.name}\``) +
+        `\n\nProje: ${active.name}` +
+        lastResultTooltip(active)
     );
+    // Son derleme basarisizsa Eclipse'teki kirmizi isaretler gibi goze carpsin.
+    if (!building && failed(lastResult.get(active.uri.toString()))) {
+      bar.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+    }
     bar.show();
 
     taskBar.text = `$(list-selection) ${opt.name}`;
@@ -712,9 +1161,13 @@ function render() {
     }
   }
 
+  renderStop();
+
   vscode.commands.executeCommand('setContext', 'buildbar.hasProject', !!opt);
   // Ust sagdaki dugmenin ikonu bu anahtara gore degisiyor.
   vscode.commands.executeCommand('setContext', 'buildbar.isLaunch', isLaunch(opt));
+  // Durdur dugmesi (editor basligi, agac basligi) bu anahtarla gorunur.
+  vscode.commands.executeCommand('setContext', 'buildbar.isRunning', anyRunning());
   treeChanged.fire();
 }
 
@@ -808,6 +1261,30 @@ function folderFromArgs(uri, uris) {
   return vscode.workspace.getWorkspaceFolder(target);
 }
 
+/** Coklu secimdeki farkli projeler, secim sirasiyla. */
+function foldersFromArgs(uri, uris) {
+  const targets = Array.isArray(uris) && uris.length ? uris : uri ? [uri] : [];
+  const seen = new Set();
+  const out = [];
+  for (const target of targets) {
+    const folder = vscode.workspace.getWorkspaceFolder(target);
+    if (!folder || seen.has(folder.uri.toString())) continue;
+    seen.add(folder.uri.toString());
+    out.push(folder);
+  }
+  return out;
+}
+
+/**
+ * Komutun hedef projeleri. Agac satirindan dugum, Explorer'dan URI gelir;
+ * komut paletinden arguman gelmez, o zaman aktif proje.
+ */
+function targetFolders(arg, uris) {
+  if (arg && (arg.kind === 'project' || arg.kind === 'option')) return [arg.folder];
+  if (arg && typeof arg === 'object' && 'fsPath' in arg) return foldersFromArgs(arg, uris);
+  return active ? [active] : [];
+}
+
 // ---------------------------------------------------------------- komutlar
 
 async function cmdBuild() {
@@ -818,29 +1295,39 @@ async function cmdBuild() {
       `BuildBar: ${active.name} icin secenek bulunamadi (${sourceFiles(active)}).`
     );
   }
-  await runOption(active, opt);
+  await buildFolder(active, opt);
 }
 
 async function cmdBuildNode(node) {
   if (!node || node.kind !== 'option') return cmdBuild();
   remember(node.folder, node.opt);
   setActive(node.folder);
-  await runOption(node.folder, node.opt);
+  await buildFolder(node.folder, node.opt);
 }
 
-async function cmdPickTask() {
-  if (!active) return void vscode.window.showWarningMessage('BuildBar: aktif proje yok.');
-  const list = optionsFor(active);
+/**
+ * Secenek listesi. Eclipse'teki iki dugmenin ikisini de karsilar:
+ *   Enter               -> yalnizca sec (Set Active Build Configuration)
+ *   satirdaki dugme     -> sec ve hemen derle (cekicin acilir oku)
+ * runOnAccept true ise Enter da derler (Sec ve derle... komutu).
+ *
+ * @param {vscode.WorkspaceFolder} folder
+ * @param {{runOnAccept?: boolean}} [opts]
+ */
+async function pickOption(folder, opts) {
+  const runOnAccept = !!(opts && opts.runOnAccept);
+  const list = optionsFor(folder);
   if (!list.length) {
     return void vscode.window.showWarningMessage(
-      `BuildBar: ${active.name} icin secenek bulunamadi (${sourceFiles(active)}).`
+      `BuildBar: ${folder.name} icin secenek bulunamadi (${sourceFiles(folder)}).`
     );
   }
 
-  const current = currentOption(active);
+  const current = currentOption(folder);
+  const verb = list.every(isLaunch) ? 'baslat' : list.some(isLaunch) ? 'derle / baslat' : 'derle';
 
-  // showQuickPick'in 'picked' alani yalnizca canPickMany ile calisiyor,
-  // o yuzden secili olani etiketin icinde isaretliyoruz.
+  // QuickPickItem.picked yalnizca canPickMany ile calisiyor, o yuzden secili
+  // olani etiketin icinde isaretliyoruz.
   const items = list.map((o) => {
     const isCurrent = !!current && optionKey(o) === optionKey(current);
     return {
@@ -853,19 +1340,62 @@ async function cmdPickTask() {
         o.detail
       ]
         .filter(Boolean)
-        .join('  -  ')
+        .join('  -  '),
+      buttons: [
+        isLaunch(o)
+          ? { iconPath: new vscode.ThemeIcon('debug-alt'), tooltip: 'Sec ve baslat' }
+          : { iconPath: new vscode.ThemeIcon('play'), tooltip: 'Sec ve derle' }
+      ]
     };
   });
 
-  const picked = await vscode.window.showQuickPick(items, {
-    title: `${active.name} - ${sourceLabel(active)}`,
-    placeHolder: current ? `su an secili: ${current.name}` : undefined,
-    matchOnDescription: true
-  });
-  if (!picked) return;
+  const qp = vscode.window.createQuickPick();
+  qp.title = `${folder.name} - ${sourceLabel(folder)}`;
+  qp.placeholder = [
+    current ? `su an secili: ${current.name}` : undefined,
+    runOnAccept ? `Enter: sec ve ${verb}` : `Enter: sec, satirdaki dugme: sec ve ${verb}`
+  ]
+    .filter(Boolean)
+    .join('  |  ');
+  qp.matchOnDescription = true;
+  qp.items = items;
+  const currentItem = items.find((i) => current && optionKey(i.opt) === optionKey(current));
+  if (currentItem) qp.activeItems = [currentItem];
 
-  remember(active, picked.opt);
+  /** @type {{opt: BuildOption, run: boolean} | undefined} */
+  let choice;
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = (item, run) => {
+      if (done) return;
+      done = true;
+      if (item) choice = { opt: item.opt, run };
+      qp.hide();
+      resolve();
+    };
+    qp.onDidAccept(() => finish(qp.selectedItems[0] || qp.activeItems[0], runOnAccept));
+    qp.onDidTriggerItemButton((e) => finish(e.item, true));
+    qp.onDidHide(() => {
+      qp.dispose();
+      finish(undefined, false);
+    });
+    qp.show();
+  });
+  if (!choice) return;
+
+  remember(folder, choice.opt);
   render();
+  if (choice.run) await buildFolder(folder, choice.opt);
+}
+
+async function cmdPickTask() {
+  if (!active) return void vscode.window.showWarningMessage('BuildBar: aktif proje yok.');
+  await pickOption(active);
+}
+
+async function cmdPickAndBuild() {
+  if (!active) return void vscode.window.showWarningMessage('BuildBar: aktif proje yok.');
+  await pickOption(active, { runOnAccept: true });
 }
 
 async function cmdPickProject() {
@@ -898,23 +1428,45 @@ function cmdSetActiveFromExplorer(uri, uris) {
   }
 }
 
-/** Explorer sag tik: aktif projeyi degistir ve secili gorevi derle. */
+/**
+ * Explorer sag tik: aktif projeyi degistir ve secili gorevi derle.
+ * Birden fazla proje seciliyse Eclipse'teki cekic gibi hepsini sirayla
+ * derler; ilki aktif proje olur.
+ */
 async function cmdBuildFromExplorer(uri, uris) {
-  const folder = folderFromArgs(uri, uris);
-  if (!folder) {
+  const folders = foldersFromArgs(uri, uris);
+  if (!folders.length) {
     return void vscode.window.showWarningMessage(
       'BuildBar: bu kaynak bir workspace klasorunun icinde degil.'
     );
   }
+  const folder = folders[0];
   setActive(folder, { reveal: true });
 
-  const opt = currentOption(folder);
-  if (!opt) {
-    return void vscode.window.showWarningMessage(
-      `BuildBar: ${folder.name} icinde ${sourceFiles(folder)} bulunamadi.`
-    );
+  if (folders.length === 1) {
+    const opt = currentOption(folder);
+    if (!opt) {
+      return void vscode.window.showWarningMessage(
+        `BuildBar: ${folder.name} icinde ${sourceFiles(folder)} bulunamadi.`
+      );
+    }
+    return void (await buildFolder(folder, opt));
   }
-  await runOption(folder, opt);
+
+  const steps = [];
+  const skipped = [];
+  for (const f of folders) {
+    const opt = currentOption(f);
+    if (!opt) skipped.push(`${f.name}: secenek yok`);
+    // Coklu derlemede hata ayiklama oturumlari ust uste acilmasin.
+    else if (isLaunch(opt)) skipped.push(`${f.name}: hata ayiklama yapilandirmasi, atlandi`);
+    else steps.push({ folder: f, opt });
+  }
+  if (!steps.length) {
+    return void vscode.window.showWarningMessage(`BuildBar: ${skipped.join('; ')}`);
+  }
+  const results = await runQueue(steps);
+  if (results) summarize(results, skipped);
 }
 
 /** Explorer sag tik: aktif projeyi degistir ve gorev listesini ac. */
@@ -928,6 +1480,68 @@ async function cmdPickTaskFromExplorer(uri, uris) {
   setActive(folder, { reveal: true });
   await cmdPickTask();
 }
+
+/** Explorer sag tik: aktif projeyi degistir, listeden secileni hemen derle. */
+async function cmdPickAndBuildFromExplorer(uri, uris) {
+  const folder = folderFromArgs(uri, uris);
+  if (!folder) {
+    return void vscode.window.showWarningMessage(
+      'BuildBar: bu kaynak bir workspace klasorunun icinde degil.'
+    );
+  }
+  setActive(folder, { reveal: true });
+  await pickOption(folder, { runOnAccept: true });
+}
+
+/** Durdur: izlenen butun derlemeler ve kuyruk (Launch Bar'daki Stop gibi). */
+async function cmdStop() {
+  const hadQueue = !!queue;
+  const count = await stopRuns();
+  if (!count && !hadQueue) {
+    vscode.window.showInformationMessage('BuildBar: suren bir derleme yok.');
+  }
+}
+
+/**
+ * Temizle / Temizle ve derle (Eclipse: Project > Clean..., "Start a build
+ * immediately"). Agac satirindan, Explorer'dan (coklu secim dahil) ya da
+ * komut paletinden (aktif proje) cagrilir.
+ */
+async function cleanCommand(arg, uris, andBuild) {
+  const folders = targetFolders(arg, uris);
+  if (!folders.length) return void vscode.window.showWarningMessage('BuildBar: aktif proje yok.');
+  if (arg) setActive(folders[0], { reveal: true });
+
+  const steps = [];
+  const missing = [];
+  for (const f of folders) {
+    const clean = cleanOption(f);
+    if (!clean) {
+      missing.push(f.name);
+      continue;
+    }
+    steps.push({ folder: f, opt: clean });
+    if (andBuild) {
+      const opt = currentOption(f);
+      if (opt && !isLaunch(opt)) steps.push({ folder: f, opt, needsPrevious: true });
+    }
+  }
+
+  if (missing.length) {
+    vscode.window.showInformationMessage(
+      `BuildBar: ${missing.join(', ')} icin temizlik gorevi tanimli degil. ` +
+        'tasks.json icindeki temizlik gorevinin etiketini "buildbar.cleanTask" ayarina yazin ' +
+        '(CMakePresets projelerinde gerekmez).'
+    );
+  }
+  if (!steps.length) return;
+
+  const results = await runQueue(steps);
+  if (results && folders.length > 1) summarize(results, []);
+}
+
+const cmdClean = (arg, uris) => cleanCommand(arg, uris, false);
+const cmdCleanBuild = (arg, uris) => cleanCommand(arg, uris, true);
 
 async function cmdRefresh() {
   optionsCache.clear();
@@ -957,7 +1571,15 @@ function activate(ctx) {
   );
   taskBar.name = 'BuildBar: derleme gorevi';
 
-  view = vscode.window.createTreeView('buildbar.projects', {
+  // Derle ile gorev arasinda, yalnizca derleme surerken gorunur.
+  stopBar = vscode.window.createStatusBarItem(
+    'buildbar.stop',
+    vscode.StatusBarAlignment.Left,
+    999.5
+  );
+  stopBar.name = 'BuildBar: durdur';
+
+  view =vscode.window.createTreeView('buildbar.projects', {
     treeDataProvider: provider,
     showCollapseAll: true
   });
@@ -979,6 +1601,7 @@ function activate(ctx) {
   ctx.subscriptions.push(
     bar,
     taskBar,
+    stopBar,
     view,
     watcher,
     treeChanged,
@@ -994,7 +1617,20 @@ function activate(ctx) {
     vscode.commands.registerCommand('buildbar.setActiveFromExplorer', cmdSetActiveFromExplorer),
     vscode.commands.registerCommand('buildbar.buildFromExplorer', cmdBuildFromExplorer),
     vscode.commands.registerCommand('buildbar.pickTaskFromExplorer', cmdPickTaskFromExplorer),
+    vscode.commands.registerCommand('buildbar.pickAndBuild', cmdPickAndBuild),
+    vscode.commands.registerCommand(
+      'buildbar.pickAndBuildFromExplorer',
+      cmdPickAndBuildFromExplorer
+    ),
+    vscode.commands.registerCommand('buildbar.stop', cmdStop),
+    vscode.commands.registerCommand('buildbar.clean', cmdClean),
+    vscode.commands.registerCommand('buildbar.cleanBuild', cmdCleanBuild),
     vscode.commands.registerCommand('buildbar.refresh', cmdRefresh),
+
+    // Derleme durumu: baslangic, surec bitisi (cikis kodu), gorev bitisi.
+    vscode.tasks.onDidStartTask(onTaskStarted),
+    vscode.tasks.onDidEndTaskProcess(onTaskProcessEnded),
+    vscode.tasks.onDidEndTask(onTaskEnded),
 
     watcher.onDidChange(cmdRefresh),
     watcher.onDidCreate(cmdRefresh),

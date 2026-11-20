@@ -9,10 +9,10 @@ eklentiye ozel bir dosya formati yok.
 
 | Yer | Icerik |
 | --- | --- |
-| Editor baslik cubugu (ust sag) | `▶` derle (ya da `🐞` hata ayikla), `☰` secenek sec |
-| Status bar (alt sol) | `▶ proje-adi` + `☰ secenek-adi` — ikisi yan yana |
-| Explorer paneli | "BuildBar" agaci: projeler > secenekler |
-| Explorer sag tik | `BuildBar >` alt menusu: derle / secenek sec / aktif proje yap |
+| Editor baslik cubugu (ust sag) | `▶` derle (ya da `🐞` hata ayikla), `☰` secenek sec; derleme surerken solda `■` durdur |
+| Status bar (alt sol) | `▶ proje-adi` + `☰ secenek-adi` — ikisi yan yana; derleme surerken `⟳ proje-adi` + `■` |
+| Explorer paneli | "BuildBar" agaci: projeler > secenekler; proje satirinda sag tik: temizle / temizle ve derle |
+| Explorer sag tik | `BuildBar >` alt menusu: derle / secenek sec / sec ve derle / aktif proje yap / temizle / temizle ve derle |
 
 Secili secenek bir **gorev** ise dugme `$(play)` ikonuyla derler; bir
 **launch yapilandirmasi** ise `$(debug-alt)` ikonuyla hata ayiklama oturumu
@@ -150,6 +150,80 @@ ad)` cagrilir. Ad klasor kapsaminda cozuldugu icin dogru projenin
 `launch.json` dosyasi kullanilir; compound girdiler de ayni yolla baslar.
 Oturum baslamazsa (ornegin yapilandirma gecersizse) uyari gosterilir.
 
+## Sec ve derle
+
+Eclipse'teki cekicin acilir okunun karsiligi. `☰` listesinde (status bar ya
+da editor baslik cubugu) her satirin sonunda bir `▶` (launch
+yapilandirmasinda `🐞`) dugmesi var:
+
+- **Enter** yalnizca secer — "Set Active Build Configuration" gibi.
+- **Satirdaki dugme** secer ve hemen derler (ya da oturumu baslatir).
+
+Klavyeyle ayni is icin **BuildBar: Sec ve derle...** komutu: bu listede
+Enter secer ve derler. Explorer'daki `BuildBar >` alt menusunde de var.
+
+## Derleme durumu, durdur ve sonuc
+
+Projenin bir secenegi (ya da temizlik gorevi) kosarken — BuildBar'dan, Ctrl+Shift+B
+ile ya da Terminal > Run Task ile baslatilmis olmasi farketmez:
+
+- status bar'daki derle ogesi `⟳ proje-adi` olur, agacta proje satiri
+  `(derleniyor)` yazar ve kosan secenegin ikonu doner,
+- yaninda bir `■` **durdur** dugmesi cikar (editor baslik cubugunda ve agac
+  basliginda da). Durdur, izlenen butun derlemeleri ve siradaki isleri
+  sonlandirir — Eclipse'teki Progress iptali ya da Launch Bar'daki Stop gibi.
+- Derleme surerken derle dugmesine yeniden basilirsa Eclipse'teki gibi sorar:
+  **Durdur** ya da **Yeniden baslat**. Cift tiklama derlemeyi kazara
+  durdurmaz, ayni gorev ust uste de baslamaz.
+
+Bitince status bar'da birkac saniye sonuc satiri gorunur (Eclipse
+konsolundaki "Build Finished" satirinin karsiligi):
+
+```
+✓ BuildBar: proje-a / host-debug tamam (4,1 sn)
+✗ BuildBar: proje-c / host-O0 basarisiz (cikis 2) - Problems: 3 hata, 1 uyari
+```
+
+Son derleme basarisizsa derle ogesinin arka plani kirmizi kalir; bir sonraki
+derleme baslayinca temizlenir. Ipucunda son sonuc ve o projenin Problems
+sayisi yazar.
+
+Izlenen gorevler: projenin secenek listesindekiler, `buildbar.cleanTask` ve
+BuildBar'in sentezledikleri. Listede olmayan gorevler (ornegin bir `watch`
+gorevi) durdur dugmesini acmaz.
+
+## Temizle
+
+Eclipse'teki Project > Clean... ve "Start a build immediately" karsiligi.
+
+- **Temizle**: projenin temizlik gorevini kosar. Secili secenek degismez.
+- **Temizle ve derle**: once temizler, temizlik basarili biterse secili
+  secenegi derler.
+
+Ikisi de Explorer'daki `BuildBar >` alt menusunde, agactaki proje satirinin
+sag tik menusunde ve komut paletinde (aktif proje icin) var. Explorer'da
+birden fazla proje seciliyse hepsine sirayla uygulanir.
+
+Temizlik gorevi `buildbar.cleanTask` ayariyla adlandirilir:
+
+```json
+{ "buildbar.cleanTask": "temizle" }
+```
+
+Bu gorev artik secenek listesinde gorunmez — bir yapilandirma degil.
+`CMakePresets.json` projelerinde ayar gerekmez: secili preset icin
+`cmake --build --preset X --target clean` kosar.
+
+## Explorer'da coklu secim
+
+Explorer'da birden fazla proje (ya da farkli projelerden dosyalar) secip
+**BuildBar > Derle / baslat** dendiginde her projenin secili secenegi
+**sirayla** derlenir: bir sonraki proje, oncekinin gorevi bittikten sonra
+baslar. Biri basarisiz olsa da digerlerine devam edilir, sonunda tek bir
+ozet bildirimi gelir. Ilk proje aktif proje olur. Secili secenegi launch
+yapilandirmasi olan projeler bu sirada atlanir (hata ayiklama oturumlari ust
+uste acilmasin diye).
+
 ## Ayarlar
 
 | Ayar | Varsayilan | Aciklama |
@@ -161,8 +235,33 @@ Oturum baslamazsa (ornegin yapilandirma gecersizse) uyari gosterilir.
 | `buildbar.onlyBuildGroup` | `false` | Yalnizca `group: build` gorevlerini listele |
 | `buildbar.cmakeFallback` | `true` | tasks.json yoksa CMakePresets.json'a dus |
 | `buildbar.problemMatchers` | `["$gcc"]` | Gorev kendi matcher'ini vermezse kullanilir |
+| `buildbar.cleanTask` | `""` | Temizle komutunun kosacagi `tasks.json` gorevinin etiketi |
 
 `followActiveEditor` **window**, digerleri **resource** kapsaminda.
+
+## Eclipse karsiligi
+
+Eclipse CDT'den gelenler icin kisa bir esleme.
+
+| Eclipse | VS Code + BuildBar |
+| --- | --- |
+| Cekic (Build): secili projenin aktif yapilandirmasini derler | `▶ proje` (status bar) ya da ust sagdaki `▶` |
+| Cekicin acilir oku: sec ve derle | `☰` listesinde satirdaki `▶` dugmesi; ya da **Sec ve derle...** |
+| Set Active Build Configuration | `☰` listesinde Enter, ya da agacta satira tiklamak |
+| Birden fazla proje secip cekic | Explorer'da coklu secim > **BuildBar > Derle / baslat** |
+| Project > Clean... (+ "Start a build immediately") | **Temizle** / **Temizle ve derle** (`buildbar.cleanTask`) |
+| Progress iptali, Launch Bar Stop | `■` durdur dugmesi |
+| Konsoldaki "Build Finished. N errors..." | Status bar'daki sonuc satiri, basarisizlikta kirmizi arka plan |
+| Build Console | Gorevin terminal paneli (`presentation` ayarlari) |
+| Problems gorunumu, Next/Previous Error | Problems paneli, F8 / Shift+F8 |
+| Save automatically before build | `task.saveBeforeRun` (VS Code, varsayilan `always`) |
+| Build before launching | `launch.json` icinde `preLaunchTask` |
+| Launch Bar: yapilandirma secici + Launch | `buildbar.source: launch` ya da `both` |
+| Manage Configurations... | `tasks.json` / `launch.json` dosyasini duzenlemek |
+
+Bilerek olmayanlar: Build All (Ctrl+B), varsayilan kisayol, Run/Debug mod
+secici, Working Set, Build Automatically, target secici (VS Code'da hedef
+kavrami yok; hedef `launch.json` icinde tanimlanir).
 
 ## Gelistirme
 
@@ -214,3 +313,12 @@ Yeni surum icin `version` alanini yukseltip `CHANGELOG.md` girdisini yazmak ve
 - Sentezleme yoluna dusuldugunde `dependsOn` ve satir ici `problemMatcher`
   nesneleri uygulanmaz. Pratikte bu yol yalnizca CMake preset'lerinde ve
   henuz taranmamis dosyalarda devreye girer.
+- `${input:...}` iceren ve gorev sistemine devredilen gorevlerin bitisi
+  beklenemez: coklu secimde ya da "Temizle ve derle" sirasinda bir sonraki
+  adim hemen baslar. Durum ve durdur dugmesi bu gorevlerde de calisir.
+- Problems sayisi derleyici hatalarinin yaninda dil sunucusunun (IntelliSense)
+  bildirdiklerini de icerir; Eclipse'in Problems gorunumunun Codan
+  bulgularini da saymasi gibi.
+- `buildbar.source: launch` iken `preLaunchTask` olarak kosan derleme izlenmez
+  (secenek listesinde degil); hata ayiklama oturumu VS Code'un kendi hata
+  ayiklama arac cubugundan durdurulur.

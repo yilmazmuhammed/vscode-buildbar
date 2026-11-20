@@ -49,6 +49,25 @@ let debugResult = true;
 /** Aktif sekme (metin editoru olmayan sekmeleri taklit etmek icin). */
 let activeTab;
 
+/** setStatusBarMessage ile gosterilen gecici mesajlar. */
+let statusMessages = [];
+
+/** showWarningMessage'in hangi dugmeyi dondurecegi: (mesaj, dugmeler) => dugme */
+let warnAnswer = () => undefined;
+
+/**
+ * Tanimliysa executeTask her gorevi bir sonraki turda baslatip bitirir;
+ * donen deger cikis kodudur. Tanimsizsa gorevler kendiliginden bitmez,
+ * test baslat/bitir olaylarini elle atar.
+ */
+let autoEnd;
+
+/** Gorevlerin calisma ve bitis sirasi: ['run:x', 'end:x', ...] */
+let taskLog = [];
+
+/** languages.getDiagnostics'in dondurecegi [uri, diagnostics[]] listesi. */
+let fakeDiagnostics = [];
+
 class EventEmitter {
   constructor() {
     this.handlers = [];
@@ -100,6 +119,26 @@ class Task {
   }
 }
 
+/** Gorev olaylarini eklentiye ileten yardimcilar. */
+const fireStart = (execution) => listeners.taskStart({ execution });
+const fireEnd = (execution, exitCode) => {
+  if (exitCode !== undefined) listeners.taskProcessEnd({ execution, exitCode });
+  listeners.taskEnd({ execution });
+};
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+/** vscode.TaskExecution: terminate() gercekte oldugu gibi gorevi bitirir. */
+class TaskExecution {
+  constructor(task) {
+    this.task = task;
+    this.terminated = false;
+  }
+  terminate() {
+    this.terminated = true;
+    setImmediate(() => fireEnd(this, 130));
+  }
+}
+
 const workspaceFolders = [];
 
 const vscode = {
@@ -113,7 +152,8 @@ const vscode = {
   TaskRevealKind: { Always: 1, Silent: 2, Never: 3 },
   TaskPanelKind: { Shared: 1, Dedicated: 2, New: 3 },
   TaskScope: { Global: 1, Workspace: 2 },
-  TaskGroup: { Build: 'build' },
+  TaskGroup: { Build: 'build', Clean: 'clean' },
+  DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
   StatusBarAlignment: { Left: 1, Right: 2 },
   ThemeIcon: class {
     constructor(id, color) {
@@ -152,7 +192,8 @@ const vscode = {
           launchFile: '.vscode/launch.json',
           onlyBuildGroup: false,
           cmakeFallback: true,
-          problemMatchers: ['$gcc']
+          problemMatchers: ['$gcc'],
+          cleanTask: ''
         };
         return section === 'buildbar' ? defaults[key] : undefined;
       }
@@ -208,8 +249,54 @@ const vscode = {
       lastPick = { items, opts };
       return Promise.resolve(pickAnswer(items));
     },
-    showWarningMessage: (m) => (executed.push({ kind: 'warn', message: m }), Promise.resolve()),
+    /**
+     * pickAnswer(items) ne donerse kullanici onu yapmis sayilir:
+     *   item            -> Enter
+     *   {button: item}  -> satirdaki dugmeye tiklama
+     *   undefined       -> vazgecme (Esc)
+     */
+    createQuickPick: () => {
+      const handlers = { accept: [], button: [], hide: [] };
+      const qp = {
+        items: [],
+        activeItems: [],
+        selectedItems: [],
+        hidden: false,
+        onDidAccept: (h) => (handlers.accept.push(h), { dispose() {} }),
+        onDidTriggerItemButton: (h) => (handlers.button.push(h), { dispose() {} }),
+        onDidHide: (h) => (handlers.hide.push(h), { dispose() {} }),
+        show() {
+          lastPick = { items: qp.items, opts: { title: qp.title, placeHolder: qp.placeholder } };
+          const answer = pickAnswer(qp.items);
+          Promise.resolve().then(() => {
+            if (answer && answer.button) {
+              handlers.button.forEach((h) => h({ item: answer.button, button: answer.button.buttons[0] }));
+            } else if (answer) {
+              qp.selectedItems = [answer];
+              handlers.accept.forEach((h) => h());
+            } else {
+              qp.hide();
+            }
+          });
+        },
+        hide() {
+          if (qp.hidden) return;
+          qp.hidden = true;
+          handlers.hide.forEach((h) => h());
+        },
+        dispose() {}
+      };
+      return qp;
+    },
+    setStatusBarMessage: (text) => (statusMessages.push(text), { dispose() {} }),
+    showWarningMessage: (m, ...items) => (
+      executed.push({ kind: 'warn', message: m }), Promise.resolve(warnAnswer(m, items))
+    ),
     showInformationMessage: (m) => (executed.push({ kind: 'info', message: m }), Promise.resolve())
+  },
+
+  languages: {
+    getDiagnostics: () => fakeDiagnostics
   },
 
   commands: {
@@ -231,15 +318,29 @@ const vscode = {
   tasks: {
     fetchTasks: () => Promise.resolve(fakeTasks),
     executeTask: (task) => {
+      const execution = new TaskExecution(task);
       executed.push({
         kind: 'task',
         task,
+        execution,
         name: task.name,
         line: task.execution && task.execution.render ? task.execution.render() : '(cozulmus gorev)',
         matchers: task.problemMatchers
       });
-      return Promise.resolve({ task });
-    }
+      taskLog.push(`run:${task.name}`);
+      if (autoEnd) {
+        const exitCode = autoEnd(task);
+        setImmediate(() => {
+          fireStart(execution);
+          taskLog.push(`end:${task.name}`);
+          fireEnd(execution, exitCode);
+        });
+      }
+      return Promise.resolve(execution);
+    },
+    onDidStartTask: (h) => ((listeners.taskStart = h), { dispose() {} }),
+    onDidEndTaskProcess: (h) => ((listeners.taskProcessEnd = h), { dispose() {} }),
+    onDidEndTask: (h) => ((listeners.taskEnd = h), { dispose() {} })
   }
 };
 
@@ -419,6 +520,11 @@ const treeItem = (node) => provider.getTreeItem(node);
     'buildbar.setActiveFromExplorer',
     'buildbar.buildFromExplorer',
     'buildbar.pickTaskFromExplorer',
+    'buildbar.pickAndBuild',
+    'buildbar.pickAndBuildFromExplorer',
+    'buildbar.stop',
+    'buildbar.clean',
+    'buildbar.cleanBuild',
     'buildbar.refresh'
   ].forEach((id) => {
     check(`${id} kayitli`, () => assert.ok(typeof commands[id] === 'function'));
@@ -593,6 +699,35 @@ const treeItem = (node) => provider.getTreeItem(node);
     assert.strictEqual(contexts['buildbar.isLaunch'], false);
   });
 
+  await checkAsync('source=both: ayni adli gorev ve yapilandirma ayri dugumler', async () => {
+    // proje-d'deki gorevle ayni adi tasiyan bir launch yapilandirmasi.
+    const launchFile = path.join(tempRoot, '.vscode/launch.json');
+    fs.writeFileSync(
+      launchFile,
+      JSON.stringify({
+        version: '0.2.0',
+        configurations: [{ name: 'sorulu-derleme', type: 'cppdbg', request: 'launch' }]
+      })
+    );
+    configOverrides.source = 'both';
+    try {
+      await commands['buildbar.refresh']();
+      const nodes = nodesOf('proje-d');
+      assert.strictEqual(nodes.length, 2);
+      assert.notStrictEqual(nodes[0], nodes[1], 'iki secenek ayni dugum nesnesine dusmus');
+      assert.deepStrictEqual(
+        nodes.map((n) => n.opt.kind),
+        ['task', 'launch']
+      );
+      const ids = nodes.map((n) => treeItem(n).id);
+      assert.notStrictEqual(ids[0], ids[1], 'agac kimlikleri cakisiyor');
+    } finally {
+      fs.rmSync(launchFile, { force: true });
+      delete configOverrides.source;
+      await commands['buildbar.refresh']();
+    }
+  });
+
   console.log('\ngorev secimi');
 
   await checkAsync('pickTask listesi secili olani isaretler', async () => {
@@ -692,6 +827,277 @@ const treeItem = (node) => provider.getTreeItem(node);
 
     assert.ok(!executed.some((e) => e.kind === 'task'));
     assert.ok(executed.some((e) => e.kind === 'warn'));
+  });
+
+  console.log('\nderleme durumu ve durdur');
+
+  const projectItem = (name) => treeItem(projectNodes().find((n) => n.folder.name.startsWith(name)));
+  /** proje-c'yi derletir ve kosuyu "basladi" yapar. */
+  const startBuild = async () => {
+    executed = [];
+    await commands['buildbar.build']();
+    const run = executed.find((e) => e.kind === 'task');
+    fireStart(run.execution);
+    return run;
+  };
+
+  let running;
+
+  await checkAsync('derleme baslayinca ikon doner, durdur dugmesi cikar', async () => {
+    setActiveFolder(path.join(wsRoot, 'proje-c'));
+    assert.strictEqual(contexts['buildbar.isRunning'], false);
+    assert.strictEqual(statusItems['buildbar.stop'].visible, false);
+
+    running = await startBuild();
+    assert.strictEqual(contexts['buildbar.isRunning'], true);
+    assert.match(statusItems['buildbar.build'].text, /^\$\(sync~spin\) proje-c/);
+    assert.strictEqual(statusItems['buildbar.stop'].visible, true);
+    assert.strictEqual(statusItems['buildbar.stop'].command, 'buildbar.stop');
+    assert.match(projectItem('proje-c').description, /\(derleniyor\)/);
+    const node = nodesOf('proje-c').find((n) => n.opt.name === 'host-O0');
+    assert.strictEqual(treeItem(node).iconPath.id, 'sync~spin');
+  });
+
+  await checkAsync('derleme surerken derle ikinci gorevi baslatmaz, ne yapilacagini sorar', async () => {
+    executed = [];
+    await commands['buildbar.build']();
+    assert.ok(!executed.some((e) => e.kind === 'task'), 'ikinci gorev baslamis');
+    assert.ok(executed.some((e) => e.kind === 'warn' && /host-O0 derleniyor/.test(e.message)));
+    assert.strictEqual(running.execution.terminated, false, 'soru cevapsizken durdurulmus');
+  });
+
+  await checkAsync('cikis kodu 2: kirmizi arka plan, "basarisiz" mesaji ve Problems sayisi', async () => {
+    fakeDiagnostics = [
+      [vscode.Uri.file(path.join(wsRoot, 'proje-c/src/main.c')), [{ severity: 0 }, { severity: 1 }]],
+      // Baska projenin bulgulari sayilmaz.
+      [vscode.Uri.file(path.join(wsRoot, 'proje-a/src/main.c')), [{ severity: 0 }]]
+    ];
+    statusMessages = [];
+    try {
+      fireEnd(running.execution, 2);
+      assert.strictEqual(contexts['buildbar.isRunning'], false);
+      assert.strictEqual(statusItems['buildbar.stop'].visible, false);
+      assert.strictEqual(
+        statusItems['buildbar.build'].backgroundColor.id,
+        'statusBarItem.errorBackground'
+      );
+      assert.match(statusMessages[0], /proje-c \(make\) \/ host-O0 basarisiz \(cikis 2\)/);
+      assert.match(statusMessages[0], /Problems: 1 hata, 1 uyari/);
+      assert.match(statusItems['buildbar.build'].tooltip.value, /Son derleme: `host-O0` basarisiz/);
+    } finally {
+      fakeDiagnostics = [];
+    }
+  });
+
+  await checkAsync('basarili derleme kirmizi arka plani temizler', async () => {
+    statusMessages = [];
+    const run = await startBuild();
+    // Derleme surerken onceki hata rengi gosterilmez.
+    assert.strictEqual(statusItems['buildbar.build'].backgroundColor, undefined);
+    fireEnd(run.execution, 0);
+    assert.strictEqual(statusItems['buildbar.build'].backgroundColor, undefined);
+    assert.match(statusMessages[0], /host-O0 tamam \(\d+,\d sn\)/);
+  });
+
+  await checkAsync('Durdur kosan derlemeyi sonlandirir, sonuc "durduruldu" olur', async () => {
+    statusMessages = [];
+    const run = await startBuild();
+    await commands['buildbar.stop']();
+    assert.strictEqual(run.execution.terminated, true);
+    await tick(); // terminate -> gorev biter
+    assert.strictEqual(contexts['buildbar.isRunning'], false);
+    assert.match(statusMessages[0], /host-O0 durduruldu/);
+    assert.strictEqual(statusItems['buildbar.build'].backgroundColor, undefined);
+  });
+
+  await checkAsync('derleme surerken sorulan soruya "Durdur" denirse durdurulur', async () => {
+    const run = await startBuild();
+    warnAnswer = (m, items) => (items.includes('Durdur') ? 'Durdur' : undefined);
+    try {
+      executed = [];
+      await commands['buildbar.build']();
+    } finally {
+      warnAnswer = () => undefined;
+    }
+    assert.strictEqual(run.execution.terminated, true);
+    assert.ok(!executed.some((e) => e.kind === 'task'), 'yeni gorev baslamis');
+    await tick();
+    assert.strictEqual(contexts['buildbar.isRunning'], false);
+  });
+
+  await checkAsync('"Yeniden baslat" once durdurur, bitince yeniden derler', async () => {
+    const run = await startBuild();
+    warnAnswer = (m, items) => (items.includes('Yeniden baslat') ? 'Yeniden baslat' : undefined);
+    try {
+      executed = [];
+      await commands['buildbar.build']();
+    } finally {
+      warnAnswer = () => undefined;
+    }
+    assert.strictEqual(run.execution.terminated, true);
+    const again = executed.find((e) => e.kind === 'task');
+    assert.ok(again, 'yeniden baslatilmamis');
+    assert.notStrictEqual(again.execution, run.execution);
+    assert.strictEqual(contexts['buildbar.isRunning'], false, 'eski kosu hala izleniyor');
+  });
+
+  check('secenek olmayan gorevler (watch vb.) izlenmez', () => {
+    const other = new TaskExecution({
+      name: 'izle',
+      scope: folderNamed('proje-c'),
+      definition: { type: 'shell' }
+    });
+    fireStart(other);
+    assert.strictEqual(contexts['buildbar.isRunning'], false);
+    fireEnd(other, 0);
+  });
+
+  console.log('\nsec ve derle');
+
+  await checkAsync('liste satirindaki dugme secer ve hemen derler', async () => {
+    setActiveFolder(path.join(wsRoot, 'proje-a'));
+    executed = [];
+    pickAnswer = (items) => ({ button: items.find((i) => i.opt.name === 'host-release') });
+    await commands['buildbar.pickTask']();
+
+    assert.strictEqual(lastPick.items[0].buttons[0].iconPath.id, 'play');
+    assert.match(lastPick.opts.placeHolder, /satirdaki dugme: sec ve derle/);
+    assert.strictEqual(statusItems['buildbar.task'].text, '$(list-selection) host-release');
+    const run = executed.find((e) => e.kind === 'task');
+    assert.ok(run, 'derlenmedi');
+    assert.strictEqual(run.name, 'host-release');
+  });
+
+  await checkAsync('Enter yalnizca secer, derlemez', async () => {
+    executed = [];
+    pickAnswer = (items) => items.find((i) => i.opt.name === 'arm-debug');
+    await commands['buildbar.pickTask']();
+    assert.strictEqual(statusItems['buildbar.task'].text, '$(list-selection) arm-debug');
+    assert.ok(!executed.some((e) => e.kind === 'task'), 'Enter derlemis');
+  });
+
+  await checkAsync('"Sec ve derle..." listesinde Enter secer ve derler', async () => {
+    executed = [];
+    pickAnswer = (items) => items.find((i) => i.opt.name === 'host-debug');
+    await commands['buildbar.pickAndBuild']();
+    assert.match(lastPick.opts.placeHolder, /Enter: sec ve derle/);
+    assert.strictEqual(statusItems['buildbar.task'].text, '$(list-selection) host-debug');
+    assert.strictEqual(executed.find((e) => e.kind === 'task').name, 'host-debug');
+  });
+
+  console.log('\nExplorer coklu secim');
+
+  await checkAsync('birden fazla proje secilince hepsi sirayla derlenir', async () => {
+    executed = [];
+    taskLog = [];
+    const a = vscode.Uri.file(path.join(wsRoot, 'proje-a'));
+    const c = vscode.Uri.file(path.join(wsRoot, 'proje-c/src'));
+    const doc = vscode.Uri.file(path.join(wsRoot, 'dokuman'));
+    autoEnd = () => 0;
+    try {
+      await commands['buildbar.buildFromExplorer'](a, [a, c, doc]);
+    } finally {
+      autoEnd = undefined;
+    }
+
+    // Ikinci proje, birincisi bittikten sonra baslar.
+    assert.deepStrictEqual(taskLog, ['run:host-debug', 'end:host-debug', 'run:host-O0', 'end:host-O0']);
+    assert.ok(statusItems['buildbar.build'].text.includes('proje-a'), 'ilk proje aktif olmali');
+    assert.strictEqual(contexts['buildbar.isRunning'], false);
+    const summary = executed.find((e) => e.kind === 'warn' && /host-O0: tamam/.test(e.message));
+    assert.ok(summary, 'ozet yok');
+    assert.match(summary.message, /dokuman: secenek yok/);
+  });
+
+  await checkAsync('sira surerken Durdur kalan projeleri iptal eder', async () => {
+    executed = [];
+    taskLog = [];
+    const a = vscode.Uri.file(path.join(wsRoot, 'proje-a'));
+    const c = vscode.Uri.file(path.join(wsRoot, 'proje-c'));
+    // Ilk gorev kendiliginden bitmesin; durdurulsun.
+    const pending = commands['buildbar.buildFromExplorer'](a, [a, c]);
+    await tick();
+    const first = executed.find((e) => e.kind === 'task');
+    fireStart(first.execution);
+    assert.strictEqual(statusItems['buildbar.stop'].visible, true);
+    await commands['buildbar.stop']();
+    await pending;
+
+    assert.deepStrictEqual(taskLog, ['run:host-debug'], 'ikinci proje yine de derlenmis');
+    const summary = executed.find((e) => e.kind === 'warn' && /iptal edildi/.test(e.message));
+    assert.ok(summary, 'iptal ozeti yok');
+    assert.strictEqual(contexts['buildbar.isRunning'], false);
+  });
+
+  console.log('\ntemizle');
+
+  await checkAsync('cleanTask ayarliyken temizlik gorevi listede gorunmez', async () => {
+    configOverrides.cleanTask = 'temizle';
+    await commands['buildbar.refresh']();
+    assert.deepStrictEqual(namesOf('proje-c'), ['host-O0', 'host-O2', 'arm-Os']);
+    assert.ok(!namesOf('proje-a').includes('temizle'));
+  });
+
+  await checkAsync('Temizle aktif projenin temizlik gorevini kosar', async () => {
+    setActiveFolder(path.join(wsRoot, 'proje-c'));
+    executed = [];
+    autoEnd = () => 0;
+    try {
+      await commands['buildbar.clean']();
+    } finally {
+      autoEnd = undefined;
+    }
+    const runs = executed.filter((e) => e.kind === 'task');
+    assert.strictEqual(runs.length, 1);
+    assert.match(runs[0].line, /make clean/);
+    assert.deepStrictEqual(runs[0].matchers, []); // tasks.json'daki "problemMatcher": []
+    // Secili gorev degismez: temizlik bir yapilandirma degil.
+    assert.strictEqual(statusItems['buildbar.task'].text, '$(list-selection) host-O0');
+  });
+
+  await checkAsync('CMake projesinde Temizle --target clean uretir (agac satirindan)', async () => {
+    executed = [];
+    autoEnd = () => 0;
+    try {
+      await commands['buildbar.clean'](projectNodes().find((n) => n.folder.name.startsWith('proje-b')));
+    } finally {
+      autoEnd = undefined;
+    }
+    const run = executed.find((e) => e.kind === 'task');
+    assert.match(run.line, /cmake --build --preset host-debug --target clean/);
+    assert.ok(statusItems['buildbar.build'].text.includes('proje-b'));
+  });
+
+  await checkAsync('Temizle ve derle: once temizler, bitince secili gorevi derler', async () => {
+    setActiveFolder(path.join(wsRoot, 'proje-c'));
+    taskLog = [];
+    autoEnd = () => 0;
+    try {
+      await commands['buildbar.cleanBuild']();
+    } finally {
+      autoEnd = undefined;
+    }
+    assert.deepStrictEqual(taskLog, ['run:temizle', 'end:temizle', 'run:host-O0', 'end:host-O0']);
+  });
+
+  await checkAsync('temizlik basarisizsa derleme yapilmaz', async () => {
+    taskLog = [];
+    autoEnd = (task) => (task.name === 'temizle' ? 2 : 0);
+    try {
+      await commands['buildbar.cleanBuild']();
+    } finally {
+      autoEnd = undefined;
+    }
+    assert.deepStrictEqual(taskLog, ['run:temizle', 'end:temizle']);
+  });
+
+  await checkAsync('temizlik gorevi tanimsizsa ayarin nasil yazilacagi soylenir', async () => {
+    delete configOverrides.cleanTask;
+    await commands['buildbar.refresh']();
+    executed = [];
+    await commands['buildbar.clean'](); // aktif proje: proje-c
+    assert.ok(!executed.some((e) => e.kind === 'task'));
+    assert.ok(executed.some((e) => e.kind === 'info' && /buildbar\.cleanTask/.test(e.message)));
   });
 
   await checkAsync('ayar varsayilanlari gelmese de calisir (bozuk kurulum)', async () => {

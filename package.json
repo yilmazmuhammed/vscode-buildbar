@@ -61,6 +61,30 @@
         "icon": "$(folder-library)"
       },
       {
+        "command": "buildbar.pickAndBuild",
+        "title": "Sec ve derle...",
+        "category": "BuildBar",
+        "icon": "$(play)"
+      },
+      {
+        "command": "buildbar.stop",
+        "title": "Derlemeyi durdur",
+        "category": "BuildBar",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "buildbar.clean",
+        "title": "Temizle",
+        "category": "BuildBar",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "buildbar.cleanBuild",
+        "title": "Temizle ve derle",
+        "category": "BuildBar",
+        "icon": "$(debug-restart)"
+      },
+      {
         "command": "buildbar.refresh",
         "title": "Listeyi yenile",
         "category": "BuildBar",
@@ -87,6 +111,11 @@
         "icon": "$(list-selection)"
       },
       {
+        "command": "buildbar.pickAndBuildFromExplorer",
+        "title": "Sec ve derle...",
+        "icon": "$(play)"
+      },
+      {
         "command": "buildbar.setActiveFromExplorer",
         "title": "Aktif proje yap",
         "icon": "$(folder-library)"
@@ -101,6 +130,11 @@
     ],
     "menus": {
       "editor/title": [
+        {
+          "command": "buildbar.stop",
+          "group": "navigation@-102",
+          "when": "buildbar.isRunning"
+        },
         {
           "command": "buildbar.build",
           "group": "navigation@-101",
@@ -134,11 +168,28 @@
           "group": "1_run@2"
         },
         {
+          "command": "buildbar.pickAndBuildFromExplorer",
+          "group": "1_run@3"
+        },
+        {
           "command": "buildbar.setActiveFromExplorer",
           "group": "2_state@1"
+        },
+        {
+          "command": "buildbar.clean",
+          "group": "3_clean@1"
+        },
+        {
+          "command": "buildbar.cleanBuild",
+          "group": "3_clean@2"
         }
       ],
       "view/title": [
+        {
+          "command": "buildbar.stop",
+          "when": "view == buildbar.projects && buildbar.isRunning",
+          "group": "navigation@0"
+        },
         {
           "command": "buildbar.build",
           "when": "view == buildbar.projects && buildbar.hasProject && !buildbar.isLaunch",
@@ -165,9 +216,31 @@
           "command": "buildbar.debugNode",
           "when": "view == buildbar.projects && viewItem == buildbar.option.launch",
           "group": "inline"
+        },
+        {
+          "command": "buildbar.clean",
+          "when": "view == buildbar.projects && viewItem == buildbar.project",
+          "group": "1_clean@1"
+        },
+        {
+          "command": "buildbar.cleanBuild",
+          "when": "view == buildbar.projects && viewItem == buildbar.project",
+          "group": "1_clean@2"
         }
       ],
       "commandPalette": [
+        {
+          "command": "buildbar.stop",
+          "when": "buildbar.isRunning"
+        },
+        {
+          "command": "buildbar.pickAndBuild",
+          "when": "buildbar.hasProject"
+        },
+        {
+          "command": "buildbar.pickAndBuildFromExplorer",
+          "when": "false"
+        },
         {
           "command": "buildbar.debugStart",
           "when": "false"
@@ -280,6 +353,12 @@
           ],
           "scope": "resource",
           "description": "Gorev kendi problemMatcher'ini vermediginde kullanilacak matcher listesi."
+        },
+        "buildbar.cleanTask": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Temizle komutunun kosacagi tasks.json gorevinin etiketi (ornegin \"temizle\"). Bu gorev secenek listesinde gosterilmez; Temizle ve 'Temizle ve derle' komutlari onu kosar. CMakePresets projelerinde gerekmez: secili preset icin 'cmake --build --preset X --target clean' kullanilir."
         }
       }
     }
