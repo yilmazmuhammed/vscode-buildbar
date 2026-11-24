@@ -193,7 +193,8 @@ const vscode = {
           onlyBuildGroup: false,
           cmakeFallback: true,
           problemMatchers: ['$gcc'],
-          cleanTask: ''
+          cleanTask: '',
+          nestedProjectDepth: 2
         };
         return section === 'buildbar' ? defaults[key] : undefined;
       }
@@ -252,7 +253,6 @@ const vscode = {
     /**
      * pickAnswer(items) ne donerse kullanici onu yapmis sayilir:
      *   item            -> Enter
-     *   {button: item}  -> satirdaki dugmeye tiklama
      *   undefined       -> vazgecme (Esc)
      */
     createQuickPick: () => {
@@ -269,9 +269,7 @@ const vscode = {
           lastPick = { items: qp.items, opts: { title: qp.title, placeHolder: qp.placeholder } };
           const answer = pickAnswer(qp.items);
           Promise.resolve().then(() => {
-            if (answer && answer.button) {
-              handlers.button.forEach((h) => h({ item: answer.button, button: answer.button.buttons[0] }));
-            } else if (answer) {
+            if (answer) {
               qp.selectedItems = [answer];
               handlers.accept.forEach((h) => h());
             } else {
@@ -475,22 +473,53 @@ const treeItem = (node) => provider.getTreeItem(node);
 
   console.log('gorev kesfi (tasks.json)');
 
-  check('proje-a: 5 gorev, yorum satirlarina ragmen okunuyor', () => {
+  check('proje-a: 5 gorev, yorum satirlarina ragmen okunuyor, alfabetik', () => {
     assert.deepStrictEqual(namesOf('proje-a'), [
-      'host-debug',
-      'host-release',
       'arm-debug',
       'arm-release',
+      'host-debug',
+      'host-release',
       'temizle'
     ]);
   });
 
   check('proje-c: 4 gorev, son virgule ragmen okunuyor (JSONC)', () => {
-    assert.deepStrictEqual(namesOf('proje-c'), ['host-O0', 'host-O2', 'arm-Os', 'temizle']);
+    assert.deepStrictEqual(namesOf('proje-c'), ['arm-Os', 'host-O0', 'host-O2', 'temizle']);
   });
 
   check('proje-b: tasks.json yok -> CMakePresets fallback, hidden haric', () => {
-    assert.deepStrictEqual(namesOf('proje-b'), ['host-debug', 'host-release', 'arm-release']);
+    assert.deepStrictEqual(namesOf('proje-b'), ['arm-release', 'host-debug', 'host-release']);
+  });
+
+  check('proje-b: varsayilan yoksa dosyadaki ilk preset secili (alfabetik ilk degil)', () => {
+    // Aktif projeyi degistirmeden: agacta secili isareti.
+    const selected = nodesOf('proje-b').filter((n) =>
+      /\(secili\)/.test(treeItem(n).description || '')
+    );
+    assert.deepStrictEqual(
+      selected.map((n) => n.opt.name),
+      ['host-debug']
+    );
+  });
+
+  await checkAsync('siralama sayilari sayi gibi, harfleri buyuk/kucuk ayirmadan karsilastirir', async () => {
+    const tasksFile = path.join(tempRoot, '.vscode/tasks.json');
+    const saved = fs.readFileSync(tasksFile, 'utf8');
+    const task = (label) => ({ label, type: 'shell', command: 'true' });
+    fs.writeFileSync(
+      tasksFile,
+      JSON.stringify({
+        version: '2.0.0',
+        tasks: [task('debug-10'), task('Release'), task('debug-2'), task('alpha')]
+      })
+    );
+    try {
+      await commands['buildbar.refresh']();
+      assert.deepStrictEqual(namesOf('proje-d'), ['alpha', 'debug-2', 'debug-10', 'Release']);
+    } finally {
+      fs.writeFileSync(tasksFile, saved);
+      await commands['buildbar.refresh']();
+    }
   });
 
   check('proje-b: build.sh yok (cmake projesinde sarmalayici script olmaz)', () => {
@@ -654,11 +683,12 @@ const treeItem = (node) => provider.getTreeItem(node);
     configOverrides.source = 'both';
     await commands['buildbar.refresh']();
 
+    // Gorevler once, yapilandirmalar sonra; her grup kendi icinde alfabetik.
     assert.deepStrictEqual(namesOf('proje-a'), [
-      'host-debug',
-      'host-release',
       'arm-debug',
       'arm-release',
+      'host-debug',
+      'host-release',
       'temizle',
       'host-debug calistir',
       'host-release calistir',
@@ -737,9 +767,9 @@ const treeItem = (node) => provider.getTreeItem(node);
 
     assert.match(lastPick.opts.title, /proje-a/);
     assert.match(lastPick.opts.placeHolder, /host-debug/);
-    assert.strictEqual(lastPick.items[0].label, '$(check) host-debug');
-    assert.strictEqual(lastPick.items[1].label, '$(blank) host-release');
-    assert.match(lastPick.items[0].description, /secili/);
+    assert.strictEqual(lastPick.items[0].label, '$(blank) arm-debug');
+    assert.strictEqual(lastPick.items[2].label, '$(check) host-debug');
+    assert.match(lastPick.items[2].description, /secili/);
   });
 
   await checkAsync('pickTask secimi status bar ve agaci gunceller', async () => {
@@ -954,34 +984,52 @@ const treeItem = (node) => provider.getTreeItem(node);
 
   console.log('\nsec ve derle');
 
-  await checkAsync('liste satirindaki dugme secer ve hemen derler', async () => {
+  check('editor basliginda derle dugmesinin hemen saginda acilir ok var', () => {
+    const manifest = require('../package.json');
+    const title = manifest.contributes.menus['editor/title'];
+    const entry = title.find((m) => m.command === 'buildbar.pickAndBuild');
+    assert.ok(entry, 'acilir ok editor basliginda yok');
+    assert.strictEqual(entry.group, 'navigation@-100');
+    assert.ok(!title.some((m) => m.command === 'buildbar.pickTask'), 'eski liste dugmesi duruyor');
+    const build = title.find((m) => m.command === 'buildbar.build');
+    assert.strictEqual(build.group, 'navigation@-101');
+    const cmd = manifest.contributes.commands.find((c) => c.command === 'buildbar.pickAndBuild');
+    assert.strictEqual(cmd.icon, '$(chevron-down)');
+  });
+
+  await checkAsync('acilir ok listesinde Enter secer ve derler, satir dugmesi yok', async () => {
     setActiveFolder(path.join(wsRoot, 'proje-a'));
     executed = [];
-    pickAnswer = (items) => ({ button: items.find((i) => i.opt.name === 'host-release') });
-    await commands['buildbar.pickTask']();
+    pickAnswer = (items) => items.find((i) => i.opt.name === 'host-release');
+    await commands['buildbar.pickAndBuild']();
 
-    assert.strictEqual(lastPick.items[0].buttons[0].iconPath.id, 'play');
-    assert.match(lastPick.opts.placeHolder, /satirdaki dugme: sec ve derle/);
+    assert.ok(lastPick.items.every((i) => !i.buttons), 'satir dugmesi geri gelmis');
+    assert.match(lastPick.opts.placeHolder, /Enter: sec ve derle/);
     assert.strictEqual(statusItems['buildbar.task'].text, '$(list-selection) host-release');
     const run = executed.find((e) => e.kind === 'task');
     assert.ok(run, 'derlenmedi');
     assert.strictEqual(run.name, 'host-release');
   });
 
-  await checkAsync('Enter yalnizca secer, derlemez', async () => {
+  await checkAsync('status bar listesinde Enter yalnizca secer, derlemez', async () => {
     executed = [];
     pickAnswer = (items) => items.find((i) => i.opt.name === 'arm-debug');
     await commands['buildbar.pickTask']();
+    assert.match(lastPick.opts.placeHolder, /Enter: sec$/);
     assert.strictEqual(statusItems['buildbar.task'].text, '$(list-selection) arm-debug');
     assert.ok(!executed.some((e) => e.kind === 'task'), 'Enter derlemis');
   });
 
-  await checkAsync('"Sec ve derle..." listesinde Enter secer ve derler', async () => {
+  await checkAsync('acilir oktan secilen derle dugmesinin yeni varsayilani olur', async () => {
     executed = [];
     pickAnswer = (items) => items.find((i) => i.opt.name === 'host-debug');
     await commands['buildbar.pickAndBuild']();
-    assert.match(lastPick.opts.placeHolder, /Enter: sec ve derle/);
     assert.strictEqual(statusItems['buildbar.task'].text, '$(list-selection) host-debug');
+    assert.strictEqual(executed.find((e) => e.kind === 'task').name, 'host-debug');
+
+    // Python'daki gibi: sonraki derle tiklamasi ayni secenegi kosar.
+    executed = [];
+    await commands['buildbar.build']();
     assert.strictEqual(executed.find((e) => e.kind === 'task').name, 'host-debug');
   });
 
@@ -1034,7 +1082,7 @@ const treeItem = (node) => provider.getTreeItem(node);
   await checkAsync('cleanTask ayarliyken temizlik gorevi listede gorunmez', async () => {
     configOverrides.cleanTask = 'temizle';
     await commands['buildbar.refresh']();
-    assert.deepStrictEqual(namesOf('proje-c'), ['host-O0', 'host-O2', 'arm-Os']);
+    assert.deepStrictEqual(namesOf('proje-c'), ['arm-Os', 'host-O0', 'host-O2']);
     assert.ok(!namesOf('proje-a').includes('temizle'));
   });
 
@@ -1105,7 +1153,7 @@ const treeItem = (node) => provider.getTreeItem(node);
     try {
       // Eskiden burada "path argument must be of type string" hatasi vardi.
       await commands['buildbar.refresh']();
-      assert.deepStrictEqual(namesOf('proje-c'), ['host-O0', 'host-O2', 'arm-Os', 'temizle']);
+      assert.deepStrictEqual(namesOf('proje-c'), ['arm-Os', 'host-O0', 'host-O2', 'temizle']);
 
       // followActiveEditor de undefined donuyor; takip yine calismali.
       openEditor(path.join(wsRoot, 'dokuman/README.md'));
@@ -1114,6 +1162,227 @@ const treeItem = (node) => provider.getTreeItem(node);
       emptyConfig = false;
       await commands['buildbar.refresh']();
     }
+  });
+
+  console.log('\nic ice projeler (tek klasor acildi, icinde repolar)');
+
+  const repolar = path.join(wsRoot, 'repolar');
+  const inRepos = (...parts) => path.join(repolar, ...parts);
+  const rootRepolar = { name: 'repolar', index: 0, uri: vscode.Uri.file(repolar) };
+  /** VS Code'da workspace klasorlerini degistirir (File > Open Folder gibi). */
+  const openFolders = async (...folders) => {
+    workspaceFolders.splice(0, workspaceFolders.length, ...folders);
+    listeners.folders({});
+    await tick();
+  };
+  const listedNames = () => projectNodes().map((n) => n.folder.name);
+  /** Gorevleri bir sonraki turda bitirerek komutu kosar. */
+  const runToEnd = async (fn, exitCode = () => 0) => {
+    autoEnd = exitCode;
+    try {
+      await fn();
+      await tick();
+    } finally {
+      autoEnd = undefined;
+    }
+  };
+
+  await checkAsync('kap klasor yerine icindeki repolar listelenir; vendor ve 3. seviye yok', async () => {
+    vscode.window.activeTextEditor = undefined;
+    activeTab = undefined;
+    await openFolders(rootRepolar);
+    assert.deepStrictEqual(listedNames(), ['araclar/betik', 'surucu', 'uygulama']);
+    // Acilista bir repo aktif olur; onceki workspace'in butonlari kalmaz.
+    assert.strictEqual(contexts['buildbar.hasProject'], true);
+    assert.strictEqual(statusItems['buildbar.build'].text, '$(play) araclar/betik');
+  });
+
+  check('repo icindeki dosya acilinca o repo aktif olur', () => {
+    openEditor(inRepos('uygulama', 'src', 'main.c'));
+    assert.strictEqual(contexts['buildbar.hasProject'], true);
+    assert.strictEqual(statusItems['buildbar.build'].text, '$(play) uygulama');
+    assert.strictEqual(statusItems['buildbar.task'].text, '$(list-selection) derle');
+  });
+
+  check('reponun kendi .vscode/settings.json dosyasindaki buildbar.* ayari uygulanir', () => {
+    // buildbar.cleanTask: "temizle" -> temizlik gorevi listede yok.
+    assert.deepStrictEqual(namesOf('uygulama'), ['derle', 'yapilandir']);
+  });
+
+  check('vendor klasorundeki dosya kapsayan repoya aittir', () => {
+    openEditor(inRepos('uygulama', 'vendor', 'kutuphane', 'CMakePresets.json'));
+    assert.strictEqual(statusItems['buildbar.build'].text, '$(play) uygulama');
+  });
+
+  check('kap klasordeki dosyada butonlar kaybolur', () => {
+    openEditor(inRepos('NOTLAR.md'));
+    assert.strictEqual(contexts['buildbar.hasProject'], false);
+    assert.match(statusItems['buildbar.build'].text, /repolar: secenek yok/);
+  });
+
+  await checkAsync('derle once dependsOn gorevini kosar; repo klasorunde, workspace kapsaminda', async () => {
+    openEditor(inRepos('uygulama', 'src', 'main.c'));
+    executed = [];
+    taskLog = [];
+    statusMessages = [];
+    await runToEnd(() => commands['buildbar.build']());
+
+    assert.deepStrictEqual(taskLog, ['run:yapilandir', 'end:yapilandir', 'run:derle', 'end:derle']);
+    const main = executed.filter((e) => e.kind === 'task')[1];
+    assert.strictEqual(main.line, 'make derle');
+    assert.strictEqual(main.task.execution.options.cwd, inRepos('uygulama'));
+    // VS Code ic ice klasoru tanimaz; gorev workspace klasoru kapsaminda kosar.
+    assert.strictEqual(main.task.scope, rootRepolar);
+    assert.strictEqual(main.task.definition.folder, inRepos('uygulama'));
+    assert.deepStrictEqual(main.matchers, ['$gcc']);
+    assert.ok(statusMessages.some((m) => /uygulama \/ derle tamam/.test(m)), 'sonuc satiri yok');
+    assert.strictEqual(contexts['buildbar.isRunning'], false);
+  });
+
+  await checkAsync('dependsOn gorevi basarisizsa derleme kosmaz', async () => {
+    taskLog = [];
+    await runToEnd(
+      () => commands['buildbar.build'](),
+      (task) => (task.name === 'yapilandir' ? 2 : 0)
+    );
+    assert.deepStrictEqual(taskLog, ['run:yapilandir', 'end:yapilandir']);
+  });
+
+  await checkAsync('repo derlemesi izlenir: donen ikon, (derleniyor), Problems yalnizca bu repodan', async () => {
+    executed = [];
+    statusMessages = [];
+    const pending = commands['buildbar.build']();
+    await tick();
+    const dep = executed.find((e) => e.kind === 'task');
+    fireStart(dep.execution);
+    assert.strictEqual(contexts['buildbar.isRunning'], true);
+    assert.match(statusItems['buildbar.build'].text, /^\$\(sync~spin\) uygulama/);
+    assert.match(projectItem('uygulama').description, /\(derleniyor\)/);
+
+    fireEnd(dep.execution, 0);
+    await pending;
+    const main = executed.filter((e) => e.kind === 'task')[1];
+    assert.ok(main, 'dependsOn bitince derle baslamadi');
+    fakeDiagnostics = [
+      [vscode.Uri.file(inRepos('uygulama', 'src', 'main.c')), [{ severity: 0 }]],
+      [vscode.Uri.file(inRepos('surucu', 'src', 'surucu.c')), [{ severity: 0 }]]
+    ];
+    try {
+      fireStart(main.execution);
+      fireEnd(main.execution, 2);
+    } finally {
+      fakeDiagnostics = [];
+    }
+    assert.strictEqual(contexts['buildbar.isRunning'], false);
+    const line = statusMessages.find((m) => /derle basarisiz/.test(m));
+    assert.match(line, /uygulama \/ derle basarisiz \(cikis 2\)/);
+    assert.match(line, /Problems: 1 hata, 0 uyari/);
+  });
+
+  await checkAsync('Temizle reponun kendi ayarindaki temizlik gorevini kosar', async () => {
+    executed = [];
+    await runToEnd(() => commands['buildbar.clean']());
+    const runs = executed.filter((e) => e.kind === 'task');
+    assert.strictEqual(runs.length, 1);
+    assert.strictEqual(runs[0].line, 'make temizle');
+  });
+
+  await checkAsync('iki seviye derinde ${workspaceFolder} repoya cozulur, ${env:...} VS Code a kalir', async () => {
+    openEditor(inRepos('araclar', 'betik', 'uret.sh'));
+    assert.strictEqual(statusItems['buildbar.build'].text, '$(play) araclar/betik');
+    executed = [];
+    await runToEnd(() => commands['buildbar.build']());
+    const run = executed.find((e) => e.kind === 'task');
+    assert.ok(run, 'gorev kosmadi');
+    assert.strictEqual(run.line, `sh ${inRepos('araclar', 'betik')}/uret.sh \${env:HOME}`);
+    assert.ok(!executed.some((e) => e.kind === 'command'), 'gorev sistemine devredilmis');
+  });
+
+  await checkAsync('${input:...} repoda devredilmez, uyari verir', async () => {
+    const node = nodesOf('araclar/betik').find((n) => n.opt.name === 'sorulu-uret');
+    executed = [];
+    await commands['buildbar.buildNode'](node);
+    assert.ok(!executed.some((e) => e.kind === 'task' || e.kind === 'command'));
+    assert.ok(executed.some((e) => e.kind === 'warn' && /\$\{input:\.\.\.\}/.test(e.message)));
+  });
+
+  await checkAsync('Explorer sag tik: CMake reposu aktif olur ve kendi klasorunde derlenir', async () => {
+    setActiveFolder(inRepos('surucu', 'src'));
+    assert.strictEqual(statusItems['buildbar.build'].text, '$(play) surucu');
+    executed = [];
+    await runToEnd(() => commands['buildbar.build']());
+    const run = executed.find((e) => e.kind === 'task');
+    assert.match(run.line, /cmake --preset debug && cmake --build --preset debug/);
+    assert.strictEqual(run.task.execution.options.cwd, inRepos('surucu'));
+  });
+
+  await checkAsync('launch: preLaunchTask repoda kosar, yapilandirma nesne olarak verilir', async () => {
+    configOverrides.source = 'both';
+    try {
+      await commands['buildbar.refresh']();
+      const node = nodesOf('uygulama').find((n) => n.opt.kind === 'launch');
+      executed = [];
+      taskLog = [];
+      debugStarts = [];
+      await runToEnd(() => commands['buildbar.debugNode'](node));
+
+      assert.deepStrictEqual(taskLog, ['run:yapilandir', 'end:yapilandir', 'run:derle', 'end:derle']);
+      assert.strictEqual(debugStarts.length, 1);
+      assert.strictEqual(debugStarts[0].folder, rootRepolar);
+      const conf = debugStarts[0].name;
+      assert.strictEqual(typeof conf, 'object', 'ad verilmis; VS Code bu launch.json i tanimaz');
+      assert.strictEqual(conf.name, 'uygulamayi calistir');
+      assert.strictEqual(conf.program, `${inRepos('uygulama')}/build/uygulama`);
+      assert.strictEqual(conf.cwd, inRepos('uygulama'));
+      assert.strictEqual(conf.preLaunchTask, undefined, 'VS Code bulamayacagi gorevi arayacak');
+
+      // preLaunchTask basarisizsa oturum baslamaz.
+      debugStarts = [];
+      executed = [];
+      await runToEnd(
+        () => commands['buildbar.debugNode'](node),
+        (task) => (task.name === 'derle' ? 2 : 0)
+      );
+      assert.strictEqual(debugStarts.length, 0);
+      assert.ok(executed.some((e) => e.kind === 'warn' && /hata ayiklama baslatilmadi/.test(e.message)));
+    } finally {
+      delete configOverrides.source;
+      await commands['buildbar.refresh']();
+    }
+  });
+
+  await checkAsync('nestedProjectDepth: 3 daha derini bulur (repo icindeki vendor yine yok), 0 eski davranis', async () => {
+    setActiveFolder(inRepos('uygulama'));
+    try {
+      configOverrides.nestedProjectDepth = 3;
+      await commands['buildbar.refresh']();
+      assert.deepStrictEqual(listedNames(), ['araclar/betik', 'cok/derin/proje', 'surucu', 'uygulama']);
+
+      configOverrides.nestedProjectDepth = 0;
+      await commands['buildbar.refresh']();
+      assert.deepStrictEqual(listedNames(), ['repolar']);
+      // Aktif repo artik proje degil: kap klasor "secenek yok".
+      assert.match(statusItems['buildbar.build'].text, /repolar: secenek yok/);
+      assert.strictEqual(contexts['buildbar.hasProject'], false);
+    } finally {
+      delete configOverrides.nestedProjectDepth;
+      await commands['buildbar.refresh']();
+    }
+  });
+
+  await checkAsync('multi-root: repo adlarinin onunde klasor adi, workspace klasoru olan repo bir kez', async () => {
+    const dokuman = { name: 'dokuman', index: 1, uri: vscode.Uri.file(path.join(wsRoot, 'dokuman')) };
+    await openFolders(rootRepolar, dokuman);
+    assert.deepStrictEqual(listedNames(), [
+      'repolar/araclar/betik',
+      'repolar/surucu',
+      'repolar/uygulama',
+      'dokuman'
+    ]);
+
+    const uygulama = { name: 'uygulama', index: 1, uri: vscode.Uri.file(inRepos('uygulama')) };
+    await openFolders(rootRepolar, uygulama);
+    assert.deepStrictEqual(listedNames(), ['repolar/araclar/betik', 'repolar/surucu', 'uygulama']);
   });
 
   fs.rmSync(tempRoot, { recursive: true, force: true });

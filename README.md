@@ -1,15 +1,24 @@
 # BuildBar
 
-Multi-root workspace'te **yalnizca aktif projenin** derleme gorevlerini ve
-hata ayiklama yapilandirmalarini kalici butonlarda gosterir. Liste projenin
-kendi `.vscode/tasks.json` ya da `.vscode/launch.json` dosyasindan gelir;
-eklentiye ozel bir dosya formati yok.
+Birden fazla proje iceren bir workspace'te **yalnizca aktif projenin**
+derleme gorevlerini ve hata ayiklama yapilandirmalarini kalici butonlarda
+gosterir. Liste projenin kendi `.vscode/tasks.json` ya da
+`.vscode/launch.json` dosyasindan gelir; eklentiye ozel bir dosya formati yok.
+
+Iki duzen de calisir:
+
+- **Multi-root workspace** (`.code-workspace`): her workspace klasoru bir
+  proje.
+- **Icinde birden fazla repo olan tek bir klasor** (File > Open Folder ile
+  `~/workspace` gibi): klasorun kendisi proje degilse alt klasorlerdeki
+  repolar ayri projeler olarak bulunur. Bkz.
+  [Tek klasorde birden fazla repo](#tek-klasorde-birden-fazla-repo).
 
 ## Ne veriyor
 
 | Yer | Icerik |
 | --- | --- |
-| Editor baslik cubugu (ust sag) | `▶` derle (ya da `🐞` hata ayikla), `☰` secenek sec; derleme surerken solda `■` durdur |
+| Editor baslik cubugu (ust sag) | `▶` derle (ya da `🐞` hata ayikla), hemen saginda `⌄` acilir ok: sec ve derle; derleme surerken solda `■` durdur |
 | Status bar (alt sol) | `▶ proje-adi` + `☰ secenek-adi` — ikisi yan yana; derleme surerken `⟳ proje-adi` + `■` |
 | Explorer paneli | "BuildBar" agaci: projeler > secenekler; proje satirinda sag tik: temizle / temizle ve derle |
 | Explorer sag tik | `BuildBar >` alt menusu: derle / secenek sec / sec ve derle / aktif proje yap / temizle / temizle ve derle |
@@ -19,7 +28,7 @@ Secili secenek bir **gorev** ise dugme `$(play)` ikonuyla derler; bir
 baslatir. Ikon `buildbar.isLaunch` baglam anahtarina gore degisir, boylece
 dugmenin ne yapacagi basmadan once bellidir.
 
-Iki dugme `navigation@-101` ve `navigation@-100` sirasiyla katkilanir;
+`▶` ve `⌄` `navigation@-101` ve `navigation@-100` sirasiyla katkilanir;
 negatif sira sayesinde onlerine baska eklentilerin butonlari (markdown
 preview gibi) girmez ve yan yana kalirlar.
 
@@ -99,9 +108,15 @@ Secili secenek **uc yerde birden** yazili durur:
 - secenek listesinde (`$(check)` isareti + "secili" etiketi),
 - agacta dolu daire ikonu + `(secili)` yazisi.
 
+Listeler (agac, `☰` ve `⌄` listeleri) **alfabetik** siralanir: sayilar
+sayi gibi karsilastirilir (`debug-2` < `debug-10`), buyuk/kucuk harf
+ayrilmaz. `both` modunda once gorevler, sonra yapilandirmalar gelir; her
+grup kendi icinde alfabetiktir.
+
 Ilk secim, `tasks.json` icinde
 `"group": { "kind": "build", "isDefault": true }` olan gorevdir; yoksa
-listedeki ilk secenek. Sonrasinda proje basina son secim `workspaceState`
+**dosyadaki** ilk secenek (alfabetik ilk degil — dosyayi yazanin sirasi
+korunur). Sonrasinda proje basina son secim `workspaceState`
 icinde saklanir — pencereyi yeniden yukleseniz de kalir. Kayit `tur:ad`
 seklinde tutulur, boylece `both` modunda ayni ada sahip bir gorev ile
 yapilandirma karismaz.
@@ -126,6 +141,57 @@ Yerlesik Explorer'da bir klasore **sol** tiklamak izlenemez; VS Code o secimi
 eklentilere aciklamiyor (bkz. microsoft/vscode#3553). Yani sadece klasore
 tiklamak aktif projeyi degistirmez. Bu yuzden sag tik menusu var: derleme de
 oradan yapilabildigi icin "hangi proje aktifti" sorusunu hic sormak gerekmez.
+
+## Tek klasorde birden fazla repo
+
+Repolar yan yana tek bir klasore klonlanmis ve VS Code'da o klasor
+(**File > Open Folder**) acilmissa:
+
+```
+workspace/              <- VS Code'da acilan klasor; kendisinde gorev yok
+  uygulama/.vscode/tasks.json
+  surucu/CMakePresets.json
+  araclar/betik/.vscode/tasks.json
+```
+
+BuildBar acilan klasorun kendisinde secenek bulamazsa alt klasorlerine iner
+ve kendi `tasks.json` / `launch.json` / `CMakePresets.json` dosyasi olan her
+klasoru ayri bir proje sayar. Agacta ve proje listesinde `uygulama`,
+`surucu`, `araclar/betik` gorunur; acilan klasor yalnizca bir kaptir.
+Aktif proje, acik dosyayi iceren **en derindeki** repodur; sag tik menusu ve
+agac da ayni sekilde calisir. Kap klasordeki bir dosyada (ornegin
+`workspace/NOTLAR.md`) butonlar kaybolur.
+
+- **Ne kadar derine:** `buildbar.nestedProjectDepth` (varsayilan `2`:
+  `workspace/repo` ve `workspace/grup/repo`). `0` aramayi kapatir.
+- **Projenin icine inilmez.** Bulunan bir reponun alt klasorleri taranmaz;
+  repo icinde vendor'lanmis bir kutuphanenin `CMakePresets.json` dosyasi ayri
+  proje gibi gorunmez. Ayni sebeple acilan klasorun kendisinde secenek varsa
+  (tek bir repo acildiysa) hic arama yapilmaz — eski davranis aynen kalir.
+- Gizli klasorlere (`.git`, `.vscode`...), `node_modules`'e ve sembolik
+  baglantilara inilmez.
+
+VS Code bu repolarin `.vscode` dosyalarini okumaz (yalnizca workspace
+klasorlerininkini okur). BuildBar eksigi soyle kapatir:
+
+| Konu | Repo workspace klasoru olsaydi | Ic ice repoda BuildBar |
+| --- | --- | --- |
+| `${workspaceFolder}` | Repo klasoru | Ayni: BuildBar repo klasorune cozer; gorev repo klasorunde kosar |
+| Diger degiskenler (`${env:...}`, `${config:...}`, `${file}`) | VS Code cozer | Ayni: VS Code gorevi kosarken cozer |
+| `${input:...}` | VS Code sorar | **Desteklenmez** — uyari verilir |
+| `dependsOn` | VS Code zincirler | BuildBar zincirler: **sirayla** (`dependsOrder: parallel` da sirali), biri basarisizsa ana gorev kosmaz |
+| `preLaunchTask` | VS Code kosar | Repodaki gorevse BuildBar kosar (dependsOn'uyla), basariliysa oturum baslar |
+| `postDebugTask` | VS Code kosar | **Desteklenmez** (VS Code gorevi bulamaz) |
+| `.vscode/settings.json` | VS Code okur | Yalnizca `buildbar.*` anahtarlarini BuildBar okur |
+
+Gorevler workspace klasoru kapsaminda, `buildbar` turunde kosar; derleme
+durumu, durdur, sonuc satiri ve Problems sayisi (yalnizca o repodaki
+bulgular) her zamanki gibi calisir.
+
+> Her seyin (IntelliSense'in `c_cpp_properties.json`'i dahil) VS Code
+> tarafindan da taninmasi isteniyorsa repolari ayri workspace klasorleri
+> olarak ekleyin (File > Add Folder to Workspace; sonra Save Workspace As...).
+> BuildBar iki duzende de ayni gorunur.
 
 ## Secenek nasil kosar
 
@@ -152,15 +218,24 @@ Oturum baslamazsa (ornegin yapilandirma gecersizse) uyari gosterilir.
 
 ## Sec ve derle
 
-Eclipse'teki cekicin acilir okunun karsiligi. `☰` listesinde (status bar ya
-da editor baslik cubugu) her satirin sonunda bir `▶` (launch
-yapilandirmasinda `🐞`) dugmesi var:
+Eclipse'teki cekicin acilir okunun karsiligi; VS Code'da Python dosyasi
+acikken calistir dugmesinin yanindaki okla ayni duzen. Editor baslik
+cubugunda `▶`'in hemen sagindaki `⌄` secenek listesini acar:
 
-- **Enter** yalnizca secer — "Set Active Build Configuration" gibi.
-- **Satirdaki dugme** secer ve hemen derler (ya da oturumu baslatir).
+- Listeden secilen secenek **secilir ve hemen derlenir** (launch
+  yapilandirmasiysa oturum baslar).
+- Secilen, `▶`'in yeni varsayilani olur; sonraki `▶` ayni secenegi kosar.
 
-Klavyeyle ayni is icin **BuildBar: Sec ve derle...** komutu: bu listede
-Enter secer ve derler. Explorer'daki `BuildBar >` alt menusunde de var.
+Status bar'daki `☰` ise **yalnizca secer** — "Set Active Build
+Configuration" gibi; derlemek icin `▶`.
+
+Ayni is komut paletinde **BuildBar: Sec ve derle...** ve Explorer'daki
+`BuildBar >` alt menusunde.
+
+> VS Code'un yerel acilir menuleri (Python'un okundaki gibi) yalnizca
+> `package.json`'da sabit basligi olan komutlari gosterebilir; projeye gore
+> degisen gorev adlari oraya konamaz. Bu yuzden `⌄` listeyi VS Code'un
+> secim kutusunda (ekranin ust ortasi) acar.
 
 ## Derleme durumu, durdur ve sonuc
 
@@ -236,8 +311,12 @@ uste acilmasin diye).
 | `buildbar.cmakeFallback` | `true` | tasks.json yoksa CMakePresets.json'a dus |
 | `buildbar.problemMatchers` | `["$gcc"]` | Gorev kendi matcher'ini vermezse kullanilir |
 | `buildbar.cleanTask` | `""` | Temizle komutunun kosacagi `tasks.json` gorevinin etiketi |
+| `buildbar.nestedProjectDepth` | `2` | Acilan klasor proje degilse alt klasorlerde kac seviye repo aranacagi; `0` kapatir |
 
-`followActiveEditor` **window**, digerleri **resource** kapsaminda.
+`followActiveEditor` **window**, digerleri **resource** kapsaminda. Ic ice
+bir reponun kendi `.vscode/settings.json` dosyasindaki `buildbar.*`
+degerleri o repo icin gecerlidir (VS Code o dosyayi okumadigi icin BuildBar
+okur).
 
 ## Eclipse karsiligi
 
@@ -246,8 +325,8 @@ Eclipse CDT'den gelenler icin kisa bir esleme.
 | Eclipse | VS Code + BuildBar |
 | --- | --- |
 | Cekic (Build): secili projenin aktif yapilandirmasini derler | `▶ proje` (status bar) ya da ust sagdaki `▶` |
-| Cekicin acilir oku: sec ve derle | `☰` listesinde satirdaki `▶` dugmesi; ya da **Sec ve derle...** |
-| Set Active Build Configuration | `☰` listesinde Enter, ya da agacta satira tiklamak |
+| Cekicin acilir oku: sec ve derle | Ust sagda `▶`'in yanindaki `⌄`; ya da **Sec ve derle...** |
+| Set Active Build Configuration | Status bar'daki `☰` listesi, ya da agacta satira tiklamak |
 | Birden fazla proje secip cekic | Explorer'da coklu secim > **BuildBar > Derle / baslat** |
 | Project > Clean... (+ "Start a build immediately") | **Temizle** / **Temizle ve derle** (`buildbar.cleanTask`) |
 | Progress iptali, Launch Bar Stop | `■` durdur dugmesi |
@@ -310,9 +389,13 @@ Yeni surum icin `version` alanini yukseltip `CHANGELOG.md` girdisini yazmak ve
   tasidiklari icin takip edilir.
 - `.code-workspace` dosyasinin icindeki (workspace kapsamli) gorevler ve
   launch yapilandirmalari listelenmez: bunlar tek bir projeye ait degil.
-- Sentezleme yoluna dusuldugunde `dependsOn` ve satir ici `problemMatcher`
-  nesneleri uygulanmaz. Pratikte bu yol yalnizca CMake preset'lerinde ve
-  henuz taranmamis dosyalarda devreye girer.
+- Sentezleme yoluna dusuldugunde satir ici `problemMatcher` nesneleri
+  uygulanmaz (yalnizca adla verilen `$gcc` gibi matcher'lar); workspace
+  klasorlerinde `dependsOn` da uygulanmaz. Pratikte bu yol CMake
+  preset'lerinde, ic ice repolarda ve henuz taranmamis dosyalarda devreye
+  girer. Ic ice repolarda `dependsOn`'u BuildBar sirayla uygular.
+- Ic ice repolarda `${input:...}` ve `postDebugTask` desteklenmez; bunlar
+  gerekiyorsa repoyu workspace klasoru olarak ekleyin.
 - `${input:...}` iceren ve gorev sistemine devredilen gorevlerin bitisi
   beklenemez: coklu secimde ya da "Temizle ve derle" sirasinda bir sonraki
   adim hemen baslar. Durum ve durdur dugmesi bu gorevlerde de calisir.

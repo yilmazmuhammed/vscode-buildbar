@@ -1,0 +1,9 @@
+{
+  "version": 3,
+  "configurePresets": [
+    { "name": "vendor-default", "binaryDir": "${sourceDir}/build" }
+  ],
+  "buildPresets": [
+    { "name": "vendor-default", "configurePreset": "vendor-default" }
+  ]
+}

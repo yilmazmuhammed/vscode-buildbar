@@ -37,6 +37,16 @@ const optionNodes = new Map();
 const optionsCache = new Map();
 
 /**
+ * Proje listesi: workspace klasorleri ve kendisi proje olmayan klasorlerin
+ * altindaki ic ice projeler. refresh ve klasor degisikligi temizler.
+ * @type {Project[] | undefined}
+ */
+let projectCache;
+
+/** Ic ice projelerin kendi .vscode/settings.json icerigi. uri -> object | null */
+const ownSettingsCache = new Map();
+
+/**
  * VS Code'un cozdugu gercek gorevler. folderUri -> Map<gorev adi, vscode.Task>
  * Derleme bunlarin uzerinden kosar; boylece dependsOn, satir ici
  * problemMatcher ve ${...} degiskenleri kaybolmaz.
@@ -76,8 +86,14 @@ let queue;
 const treeChanged = new vscode.EventEmitter();
 
 /**
- * @typedef {{ kind: 'project', folder: vscode.WorkspaceFolder }
- *         | {kind: 'option', folder: vscode.WorkspaceFolder, opt: BuildOption}} Node
+ * Proje: ya bir workspace klasoru (VS Code'un WorkspaceFolder nesnesi) ya da
+ * onun altinda kendi tasks.json / launch.json / CMakePresets.json dosyasi olan
+ * bir klasor. Ic ice projeler ayni alanlari tasir; root, VS Code'un tanidigi
+ * workspace klasorudur (gorev kapsami ve hata ayiklama icin gerekiyor).
+ * @typedef {{ uri: vscode.Uri, name: string, index: number,
+ *             root?: vscode.WorkspaceFolder }} Project
+ * @typedef {{ kind: 'project', folder: Project }
+ *         | {kind: 'option', folder: Project, opt: BuildOption}} Node
  * @typedef {{ kind: 'task' | 'launch', name: string, detail?: string,
  *             isDefault?: boolean, entry?: object, cmake?: boolean,
  *             configure?: boolean, clean?: boolean, preset?: string }} BuildOption
@@ -104,14 +120,50 @@ const DEFAULTS = {
   onlyBuildGroup: false,
   cmakeFallback: true,
   problemMatchers: ['$gcc'],
-  cleanTask: ''
+  cleanTask: '',
+  nestedProjectDepth: 2
 };
 
+/** Ic ice proje mi? (workspace klasorunun altinda, kendisi workspace klasoru degil) */
+const isNested = (folder) => !!folder && !!folder.root;
+
+/** VS Code'un tanidigi workspace klasoru: gorev kapsami ve hata ayiklama icin. */
+const rootOf = (folder) => (isNested(folder) ? folder.root : folder);
+
+/** Ayar degeri varsayilanla ayni turde mi? Elle yazilmis dosyalara karsi. */
+const sameType = (value, key) =>
+  Array.isArray(DEFAULTS[key]) ? Array.isArray(value) : typeof value === typeof DEFAULTS[key];
+
 /**
- * @param {vscode.WorkspaceFolder | undefined} folder
+ * Ic ice projenin kendi .vscode/settings.json dosyasindaki deger. VS Code bu
+ * dosyayi okumaz (yalnizca workspace klasorlerininkini okur); repo tek basina
+ * acildiginda gecerli olan buildbar.* ayari ic ice acildiginda da gecerli
+ * kalsin diye BuildBar kendisi okur.
+ */
+function ownSetting(folder, key) {
+  if (!isNested(folder)) return undefined;
+  const id = folder.uri.toString();
+  if (!ownSettingsCache.has(id)) {
+    const file = readJsonc(path.join(folder.uri.fsPath, '.vscode', 'settings.json'));
+    ownSettingsCache.set(id, file && typeof file === 'object' ? file : null);
+  }
+  const own = ownSettingsCache.get(id);
+  if (!own) return undefined;
+  const flat = own[`buildbar.${key}`];
+  if (flat !== undefined && flat !== null && sameType(flat, key)) return flat;
+  const group = own.buildbar;
+  const inner = group && typeof group === 'object' ? group[key] : undefined;
+  return inner !== undefined && inner !== null && sameType(inner, key) ? inner : undefined;
+}
+
+/**
+ * @param {Project | undefined} folder
  * @param {keyof DEFAULTS} key
  */
 function pref(folder, key) {
+  const own = ownSetting(folder, key);
+  if (own !== undefined) return own;
+
   let value;
   try {
     value = settings(folder).get(key);
@@ -385,7 +437,26 @@ function discover(folder) {
     list.push(...launchOptions(folder));
   }
 
-  return list;
+  // Dosyadaki sira yalnizca varsayilan secim icin saklanir (currentOption);
+  // listeler (agac, quick pick) alfabetik gosterilir.
+  list.forEach((opt, i) => {
+    opt.order = i;
+  });
+  return sortOptions(list);
+}
+
+/** "debug-2" < "debug-10", buyuk/kucuk harf farki yok. */
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+/**
+ * Gorevler once, yapilandirmalar sonra (both modu); her grubun icinde
+ * alfabetik. Esit adlarda dosya sirasi korunur.
+ */
+function sortOptions(list) {
+  const rank = (opt) => (isLaunch(opt) ? 1 : 0);
+  return list
+    .slice()
+    .sort((a, b) => rank(a) - rank(b) || collator.compare(a.name, b.name) || a.order - b.order);
 }
 
 /** Ayara gore hangi dosyalara bakildigi; mesajlarda kullanilir. */
@@ -432,6 +503,141 @@ function optionsFor(folder) {
 }
 
 const isBuildable = (folder) => !!folder && optionsFor(folder).length > 0;
+
+// -------------------------------------------------------- ic ice projeler
+
+/** Kesifte inilmeyen klasorler (gizli klasorler -- .git, .vscode... -- ayrica atlanir). */
+const SKIP_DIRS = new Set(['node_modules']);
+
+/** Ic ice aramada en fazla bu kadar seviye inilir (ayar ne derse desin). */
+const MAX_DEPTH = 6;
+
+/** dir, file'i (ya da kendisini) kapsiyor mu? Windows'ta buyuk/kucuk harf farki yok. */
+function contains(dir, file) {
+  const rel = path.relative(dir, file);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/**
+ * Workspace klasorunun altindaki projeler. Klasor kendisi bir projeyse
+ * cagrilmaz. Bulunan bir projenin icine inilmez: vendor'lanmis bir
+ * kutuphanenin CMakePresets.json dosyasi ayri proje gibi gorunmesin.
+ *
+ * @param {vscode.WorkspaceFolder} root
+ * @param {boolean} prefix proje adinin onune klasor adi yazilsin mi (multi-root)
+ * @returns {Project[]}
+ */
+function nestedProjects(root, prefix) {
+  const depth = Math.min(Number(pref(root, 'nestedProjectDepth')) || 0, MAX_DEPTH);
+  if (depth < 1) return [];
+
+  const rootPath = root.uri.fsPath;
+  // Baska bir workspace klasoru bu klasorun altindaysa o kendi basina listelenir.
+  const roots = (vscode.workspace.workspaceFolders || []).map((f) => f.uri.toString());
+  // Hizli on eleme: proje olabilmesi icin bu adlardan biri klasorde durmali.
+  const markers = [
+    ...new Set([
+      '.vscode',
+      'CMakePresets.json',
+      ...[pref(root, 'tasksFile'), pref(root, 'launchFile')].map(
+        (file) => String(file).split(/[\\/]/)[0]
+      )
+    ])
+  ].filter((m) => m && m !== '.' && m !== '..');
+
+  const found = [];
+  const walk = (dir, level) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      return; // izin yok, silinmis...
+    }
+    const names = entries
+      // Sembolik baglantilar izlenmez: dongu olusturabilirler.
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name))
+      .map((e) => e.name)
+      .sort(collator.compare);
+
+    for (const name of names) {
+      const full = path.join(dir, name);
+      const uri = vscode.Uri.file(full);
+      if (roots.includes(uri.toString())) continue;
+
+      if (markers.some((m) => fs.existsSync(path.join(full, m)))) {
+        const rel = path.relative(rootPath, full).split(path.sep).join('/');
+        /** @type {Project} */
+        const candidate = {
+          uri,
+          name: prefix ? `${root.name}/${rel}` : rel,
+          index: root.index,
+          root
+        };
+        if (isBuildable(candidate)) {
+          found.push(candidate);
+          continue; // projenin icine inilmez
+        }
+        optionsCache.delete(uri.toString());
+        ownSettingsCache.delete(uri.toString());
+      }
+      if (level < depth) walk(full, level + 1);
+    }
+  };
+  walk(rootPath, 1);
+  return found;
+}
+
+/**
+ * Butun projeler, workspace sirasiyla. Kendisi proje olmayan ama altinda
+ * proje bulunan bir workspace klasoru (ornegin repolarin klonlandigi
+ * ~/workspace) yalnizca bir kaptir; listede yerine icindekiler gorunur.
+ * Altinda da proje yoksa klasor eskisi gibi "secenek yok" olarak kalir.
+ *
+ * @returns {Project[]}
+ */
+function projectList() {
+  if (!projectCache) {
+    const roots = vscode.workspace.workspaceFolders || [];
+    const list = [];
+    for (const root of roots) {
+      let nested = [];
+      if (!isBuildable(root)) {
+        try {
+          nested = nestedProjects(root, roots.length > 1);
+        } catch (err) {
+          console.warn(`buildbar: ${root.name} altinda proje aranamadi -> ${err && err.message}`);
+        }
+      }
+      if (!nested.length) list.push(root);
+      list.push(...nested);
+    }
+    projectCache = list;
+  }
+  return projectCache;
+}
+
+/**
+ * Bir kaynagin ait oldugu proje: onu iceren en derindeki ic ice proje, yoksa
+ * workspace klasoru.
+ *
+ *   Project -> o proje
+ *   null    -> workspace disi
+ *
+ * @param {vscode.Uri} uri
+ * @returns {Project | null}
+ */
+function projectOf(uri) {
+  const root = vscode.workspace.getWorkspaceFolder(uri);
+  if (!root) return null;
+  const rootKey = root.uri.toString();
+  let best;
+  for (const p of projectList()) {
+    if (!isNested(p) || p.root.uri.toString() !== rootKey) continue;
+    if (!contains(p.uri.fsPath, uri.fsPath)) continue;
+    if (!best || p.uri.fsPath.length > best.uri.fsPath.length) best = p;
+  }
+  return best || root;
+}
 
 /**
  * Projenin temizlik gorevi. Once buildbar.cleanTask ayarindaki tasks.json
@@ -491,7 +697,8 @@ function currentOption(folder) {
     list.find((o) => optionKey(o) === remembered) ||
     list.find((o) => o.name === remembered) || // 0.2.x kayitlari: yalnizca ad
     list.find((o) => o.isDefault) || // tasks.json'daki varsayilan build gorevi
-    list[0]
+    // Liste alfabetik; varsayilan yoksa dosyadaki ilk girdi (alfabetik ilk degil).
+    list.reduce((first, o) => (o.order < first.order ? o : first))
   );
 }
 
@@ -535,7 +742,31 @@ function expand(value, folder) {
 const unresolved = (s) => typeof s === 'string' && VARIABLE.test(s);
 
 /**
- * @param {vscode.WorkspaceFolder} folder
+ * Ic ice projede gorevi VS Code tanimadigi icin gorev sistemine devretmek ise
+ * yaramaz. Geri kalan degiskenleri (${env:...}, ${config:...}, ${file}...)
+ * VS Code gorevi kosarken kendisi cozer; yalnizca ${input:...} cozulemez,
+ * cunku girdi tanimi VS Code'un okumadigi tasks.json dosyasinda.
+ */
+const INPUT_VARIABLE = /\$\{input:[^}]*\}/;
+
+/** Sentezlemeyi durduran bir degisken var mi? */
+const blocked = (s, folder) =>
+  typeof s === 'string' && (isNested(folder) ? INPUT_VARIABLE.test(s) : unresolved(s));
+
+/** Nesnenin butun metin alanlarinda proje degiskenlerini cozer (derin kopya). */
+function expandDeep(value, folder) {
+  if (typeof value === 'string') return expand(value, folder);
+  if (Array.isArray(value)) return value.map((v) => expandDeep(v, folder));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [key, v] of Object.entries(value)) out[key] = expandDeep(v, folder);
+    return out;
+  }
+  return value;
+}
+
+/**
+ * @param {Project} folder
  * @param {BuildOption} opt
  */
 function executionFor(folder, opt) {
@@ -565,7 +796,7 @@ function executionFor(folder, opt) {
   const dir = e.options && e.options.cwd ? expand(e.options.cwd, folder) : cwd;
 
   if (args.some((a) => typeof a !== 'string')) return undefined;
-  if ([command, dir, ...args].some(unresolved)) return undefined;
+  if ([command, dir, ...args].some((s) => blocked(s, folder))) return undefined;
 
   const opts = e.options && e.options.env ? { cwd: dir, env: e.options.env } : { cwd: dir };
 
@@ -600,9 +831,14 @@ function synthesize(folder, opt) {
   const exec = executionFor(folder, opt);
   if (!exec) return undefined;
 
+  const definition = { type: 'buildbar', task: opt.name, project: folder.name };
+  // Ic ice projenin gorevi workspace klasoru kapsaminda kosar; baslama
+  // olayinda hangi projeye ait oldugu buradan bulunur (folderOfTask).
+  if (isNested(folder)) definition.folder = folder.uri.fsPath;
+
   const task = new vscode.Task(
-    { type: 'buildbar', task: opt.name, project: folder.name },
-    folder,
+    definition,
+    rootOf(folder),
     opt.name,
     'buildbar',
     exec,
@@ -623,16 +859,19 @@ function synthesize(folder, opt) {
  * Secenegi kosar. Gorev kostuysa TaskExecution doner; hata ayiklama oturumu
  * ya da gorev sistemine devredilen islerde undefined.
  *
- * @param {vscode.WorkspaceFolder} folder
+ * @param {Project} folder
  * @param {BuildOption} opt
+ * @param {string[]} [chain] dependsOn zincirindeki gorevler (dongu korumasi)
  * @returns {Promise<vscode.TaskExecution | undefined>}
  */
-async function runOption(folder, opt) {
+async function runOption(folder, opt, chain) {
   // Hata ayiklama yapilandirmasi: derleme yok, oturum baslatilir. Ad klasor
   // kapsaminda cozuldugu icin dogru projenin launch.json'i kullanilir.
   if (isLaunch(opt)) {
-    const started = await vscode.debug.startDebugging(folder, opt.name);
-    if (!started) {
+    const started = isNested(folder)
+      ? await startNestedDebugging(folder, opt)
+      : await vscode.debug.startDebugging(folder, opt.name);
+    if (started === false) {
       vscode.window.showWarningMessage(
         `BuildBar: ${opt.name} oturumu baslatilamadi. ${pref(
           folder,
@@ -648,10 +887,26 @@ async function runOption(folder, opt) {
   const real = opt.entry && known ? known.get(opt.name) : undefined;
   if (real) return vscode.tasks.executeTask(real);
 
-  // 2) Cozulmus hali yoksa (CMake preset, henuz taranmamis dosya...)
-  //    gorevi kendimiz kurariz.
+  // Ic ice projenin tasks.json'ini VS Code tanimaz; dependsOn'u biz uygulariz.
+  if (isNested(folder) && opt.entry) {
+    if (!(await runDependencies(folder, opt, chain))) return undefined;
+    // Yalnizca dependsOn toplayan gorev: kosacak kendi komutu yok.
+    if (typeof platformEntry(opt.entry).command !== 'string') return undefined;
+  }
+
+  // 2) Cozulmus hali yoksa (CMake preset, ic ice proje, henuz taranmamis
+  //    dosya...) gorevi kendimiz kurariz.
   const task = synthesize(folder, opt);
   if (task) return vscode.tasks.executeTask(task);
+
+  if (isNested(folder)) {
+    vscode.window.showWarningMessage(
+      `BuildBar: ${folder.name} / ${opt.name} kosturulamadi. Workspace klasoru olmayan ` +
+        'projelerde ${input:...} degiskenleri desteklenmiyor; projeyi workspace klasoru ' +
+        'olarak ekleyin (File > Add Folder to Workspace).'
+    );
+    return undefined;
+  }
 
   // 3) Icinde ${input:...} gibi yalnizca VS Code'un cozebilecegi degisken
   //    var; gorev sistemine devret. Kosu onDidStartTask ile yine izlenir,
@@ -660,10 +915,102 @@ async function runOption(folder, opt) {
   return undefined;
 }
 
+/** Ic ice projenin tasks.json'inda adi verilen gorev, secenek olarak. */
+function nestedTaskOption(folder, name) {
+  const entry = taskEntries(folder).find((e) => labelOf(e) === name);
+  return entry ? { kind: 'task', name, entry } : undefined;
+}
+
+/**
+ * dependsOn'daki gorevleri sirayla kosar (dependsOrder: parallel da sirali
+ * kosar). Biri basarisizsa false: ana gorev kosmaz.
+ */
+async function runDependencies(folder, opt, chain) {
+  const raw = opt.entry.dependsOn;
+  const deps = (Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]).map((d) =>
+    typeof d === 'string' ? d : JSON.stringify(d)
+  );
+  const seen = [...(chain || []), opt.name];
+  for (const name of deps) {
+    const dep = nestedTaskOption(folder, name);
+    if (!dep || seen.includes(name)) {
+      vscode.window.showWarningMessage(
+        `BuildBar: ${folder.name} / ${opt.name}: dependsOn icindeki ${name} ` +
+          (dep ? 'bir dongu olusturuyor.' : `${pref(folder, 'tasksFile')} icinde bulunamadi.`)
+      );
+      return false;
+    }
+    if (!succeeded(await runAndWait(folder, dep, seen))) return false;
+  }
+  return true;
+}
+
+/**
+ * preLaunchTask projenin kendi tasks.json'indaysa onu biz kosariz ve alani
+ * sileriz (VS Code o gorevi bulamazdi). Bulunamazsa alan oldugu gibi kalir:
+ * VS Code'un tanidigi bir gorev olabilir. Gorev basarisizsa false.
+ */
+async function runPreLaunch(folder, conf) {
+  if (typeof conf.preLaunchTask !== 'string') return true;
+  const pre = nestedTaskOption(folder, conf.preLaunchTask);
+  if (!pre) return true;
+  delete conf.preLaunchTask;
+  const result = await runAndWait(folder, pre);
+  if (succeeded(result)) return true;
+  vscode.window.showWarningMessage(
+    `BuildBar: ${folder.name} / ${pre.name} ${statusOf(result)[1]}; hata ayiklama baslatilmadi.`
+  );
+  return false;
+}
+
+/**
+ * Ic ice projede hata ayiklama. VS Code bu launch.json'i tanimadigi icin
+ * yapilandirma adla degil nesne olarak verilir; ${workspaceFolder} projenin
+ * klasorune cozulur, compound'lar tek tek baslatilir.
+ *
+ * @returns {Promise<boolean | undefined>} undefined: basarisizlik zaten bildirildi
+ */
+async function startNestedDebugging(folder, opt) {
+  const file = readJsonc(path.join(folder.uri.fsPath, pref(folder, 'launchFile'))) || {};
+  const configs = Array.isArray(file.configurations) ? file.configurations : [];
+  const compound = (Array.isArray(file.compounds) ? file.compounds : []).find(
+    (c) => c && typeof c === 'object' && c.name === opt.name
+  );
+  const names = compound
+    ? (Array.isArray(compound.configurations) ? compound.configurations : []).map((c) =>
+        typeof c === 'string' ? c : c && c.name
+      )
+    : [opt.name];
+
+  if (compound && !(await runPreLaunch(folder, compound))) return undefined;
+
+  let started = names.length > 0;
+  for (const name of names) {
+    const conf = configs.find((c) => c && typeof c === 'object' && c.name === name);
+    if (!conf) {
+      started = false;
+      continue;
+    }
+    const resolved = expandDeep(platformEntry(conf), folder);
+    if (!(await runPreLaunch(folder, resolved))) return undefined;
+    started = (await vscode.debug.startDebugging(rootOf(folder), resolved)) && started;
+  }
+  return started;
+}
+
 // ------------------------------------------------- derleme durumu ve sonuc
 
-/** Gorevin ait oldugu workspace klasoru (yalnizca klasor kapsamli gorevler). */
+/** Gorevin ait oldugu proje (yalnizca klasor kapsamli gorevler). */
 function folderOfTask(task) {
+  // Ic ice projelerin gorevleri workspace klasoru kapsaminda kosar; asil
+  // proje sentezlerken tanima yazilan klasorden bulunur.
+  const def = task && task.definition;
+  if (def && def.type === 'buildbar' && typeof def.folder === 'string') {
+    const key = vscode.Uri.file(def.folder).toString();
+    const nested = projectList().find((p) => p.uri.toString() === key);
+    if (nested) return nested;
+  }
+
   const scope = task && task.scope;
   if (!scope || typeof scope !== 'object' || !scope.uri) return undefined;
   const key = scope.uri.toString();
@@ -774,10 +1121,10 @@ function whenEnded(execution) {
  * sistemine devredilen islerde beklenecek bir sey yok.
  * @returns {Promise<BuildResult>}
  */
-async function runAndWait(folder, opt) {
+async function runAndWait(folder, opt, chain) {
   let execution;
   try {
-    execution = await runOption(folder, opt);
+    execution = await runOption(folder, opt, chain);
   } catch (err) {
     return { name: opt.name, error: (err && err.message) || String(err) };
   }
@@ -821,7 +1168,7 @@ function problemCounts(folder) {
   let warnings = 0;
   for (const [uri, diagnostics] of all || []) {
     if (!uri || (uri.scheme && uri.scheme !== 'file')) continue;
-    const owner = vscode.workspace.getWorkspaceFolder(uri);
+    const owner = projectOf(uri);
     if (!owner || owner.uri.toString() !== key) continue;
     for (const d of diagnostics || []) {
       if (d.severity === vscode.DiagnosticSeverity.Error) errors++;
@@ -966,7 +1313,9 @@ function summarize(results, skipped) {
 const projectNode = (folder) => {
   const key = folder.uri.toString();
   if (!projectNodes.has(key)) projectNodes.set(key, { kind: 'project', folder });
-  return projectNodes.get(key);
+  const node = projectNodes.get(key);
+  node.folder = folder; // refresh sonrasi proje nesnesi yenilenmis olabilir
+  return node;
 };
 
 const optionNode = (folder, opt) => {
@@ -987,7 +1336,7 @@ const provider = {
 
   getChildren(node) {
     if (!node) {
-      return (vscode.workspace.workspaceFolders || []).map(projectNode);
+      return projectList().map(projectNode);
     }
     if (node.kind === 'project') {
       return optionsFor(node.folder).map((o) => optionNode(node.folder, o));
@@ -1068,7 +1417,7 @@ const provider = {
 // ----------------------------------------------------- aktif proje yonetimi
 
 /** Workspace'te derlenebilir en az bir proje var mi? */
-const anyBuildable = () => (vscode.workspace.workspaceFolders || []).some(isBuildable);
+const anyBuildable = () => projectList().some(isBuildable);
 
 /** Aktif projenin son derlemesi icin ipucu satirlari. */
 function lastResultTooltip(folder) {
@@ -1190,11 +1539,11 @@ function setActive(folder, opts) {
 }
 
 /**
- * Aktif editorun ait oldugu workspace klasoru.
+ * Aktif editorun ait oldugu proje (ic ice projelerde en derindeki).
  *
- *   WorkspaceFolder -> bu projeye gec
- *   null            -> workspace disi dosya, aktif projeyi temizle
- *   undefined       -> bilgi yok (ayarlar sekmesi, cikti paneli...), dokunma
+ *   Project   -> bu projeye gec
+ *   null      -> workspace disi dosya, aktif projeyi temizle
+ *   undefined -> bilgi yok (ayarlar sekmesi, cikti paneli...), dokunma
  *
  * @param {vscode.TextEditor | undefined} editor
  */
@@ -1202,7 +1551,7 @@ function folderOfEditor(editor) {
   if (!editor || !editor.document) return undefined;
   const uri = editor.document.uri;
   if (uri.scheme && uri.scheme !== 'file') return undefined;
-  return vscode.workspace.getWorkspaceFolder(uri) || null;
+  return projectOf(uri);
 }
 
 /**
@@ -1231,7 +1580,7 @@ function syncFromActiveTab() {
     const uri = uriOfActiveTab();
     if (!uri) return; // ne gosterdigini bilmiyoruz
     if (uri.scheme && uri.scheme !== 'file') return;
-    folder = vscode.workspace.getWorkspaceFolder(uri) || null;
+    folder = projectOf(uri);
   }
 
   setActive(folder || undefined);
@@ -1243,12 +1592,10 @@ function pickInitial() {
   if (f) return f;
 
   const uri = uriOfActiveTab();
-  const fromTab = uri && (!uri.scheme || uri.scheme === 'file')
-    ? vscode.workspace.getWorkspaceFolder(uri)
-    : undefined;
+  const fromTab = uri && (!uri.scheme || uri.scheme === 'file') ? projectOf(uri) : undefined;
   if (fromTab) return fromTab;
 
-  return (vscode.workspace.workspaceFolders || []).find(isBuildable);
+  return projectList().find(isBuildable);
 }
 
 /**
@@ -1258,7 +1605,7 @@ function pickInitial() {
 function folderFromArgs(uri, uris) {
   const target = Array.isArray(uris) && uris.length ? uris[0] : uri;
   if (!target) return undefined;
-  return vscode.workspace.getWorkspaceFolder(target);
+  return projectOf(target) || undefined;
 }
 
 /** Coklu secimdeki farkli projeler, secim sirasiyla. */
@@ -1267,7 +1614,7 @@ function foldersFromArgs(uri, uris) {
   const seen = new Set();
   const out = [];
   for (const target of targets) {
-    const folder = vscode.workspace.getWorkspaceFolder(target);
+    const folder = projectOf(target);
     if (!folder || seen.has(folder.uri.toString())) continue;
     seen.add(folder.uri.toString());
     out.push(folder);
@@ -1306,10 +1653,14 @@ async function cmdBuildNode(node) {
 }
 
 /**
- * Secenek listesi. Eclipse'teki iki dugmenin ikisini de karsilar:
- *   Enter               -> yalnizca sec (Set Active Build Configuration)
- *   satirdaki dugme     -> sec ve hemen derle (cekicin acilir oku)
- * runOnAccept true ise Enter da derler (Sec ve derle... komutu).
+ * Secenek listesi. Iki kullanim:
+ *   status bar'daki liste      -> Enter yalnizca secer (Set Active Build
+ *                                 Configuration)
+ *   derle dugmesinin yanindaki -> runOnAccept: Enter secer ve derler
+ *   acilir ok (Sec ve derle...)   (Python'daki "Run Python File" oku gibi;
+ *                                 secilen, derle dugmesinin yeni
+ *                                 varsayilani olur)
+ * Satir sonu dugmesi bilerek yok: sec ve derle acilir okun isi.
  *
  * @param {vscode.WorkspaceFolder} folder
  * @param {{runOnAccept?: boolean}} [opts]
@@ -1340,12 +1691,7 @@ async function pickOption(folder, opts) {
         o.detail
       ]
         .filter(Boolean)
-        .join('  -  '),
-      buttons: [
-        isLaunch(o)
-          ? { iconPath: new vscode.ThemeIcon('debug-alt'), tooltip: 'Sec ve baslat' }
-          : { iconPath: new vscode.ThemeIcon('play'), tooltip: 'Sec ve derle' }
-      ]
+        .join('  -  ')
     };
   });
 
@@ -1353,7 +1699,7 @@ async function pickOption(folder, opts) {
   qp.title = `${folder.name} - ${sourceLabel(folder)}`;
   qp.placeholder = [
     current ? `su an secili: ${current.name}` : undefined,
-    runOnAccept ? `Enter: sec ve ${verb}` : `Enter: sec, satirdaki dugme: sec ve ${verb}`
+    runOnAccept ? `Enter: sec ve ${verb}` : 'Enter: sec'
   ]
     .filter(Boolean)
     .join('  |  ');
@@ -1374,7 +1720,6 @@ async function pickOption(folder, opts) {
       resolve();
     };
     qp.onDidAccept(() => finish(qp.selectedItems[0] || qp.activeItems[0], runOnAccept));
-    qp.onDidTriggerItemButton((e) => finish(e.item, true));
     qp.onDidHide(() => {
       qp.dispose();
       finish(undefined, false);
@@ -1399,7 +1744,7 @@ async function cmdPickAndBuild() {
 }
 
 async function cmdPickProject() {
-  const folders = (vscode.workspace.workspaceFolders || []).filter(isBuildable);
+  const folders = projectList().filter(isBuildable);
   if (!folders.length) {
     return void vscode.window.showWarningMessage(
       'BuildBar: secenek iceren proje bulunamadi.'
@@ -1543,8 +1888,19 @@ async function cleanCommand(arg, uris, andBuild) {
 const cmdClean = (arg, uris) => cleanCommand(arg, uris, false);
 const cmdCleanBuild = (arg, uris) => cleanCommand(arg, uris, true);
 
-async function cmdRefresh() {
+/**
+ * Proje listesini yeniden kurar. Ic ice bir proje eklenmis ya da kaybolmus
+ * olabilir; aktif proje ayni klasorden yeniden cozulur.
+ */
+function resetProjects() {
   optionsCache.clear();
+  ownSettingsCache.clear();
+  projectCache = undefined;
+  if (active) active = projectOf(active.uri) || undefined;
+}
+
+async function cmdRefresh() {
+  resetProjects();
   optionNodes.clear();
   render(); // dosyalardan gelen liste hemen tazelensin
   await reloadRealTasks();
@@ -1597,6 +1953,9 @@ function activate(ctx) {
   const watcher = vscode.workspace.createFileSystemWatcher(
     '**/{tasks.json,launch.json,CMakePresets.json}'
   );
+  // Ic ice projelerin kendi buildbar.* ayarlari; VS Code bunlari okumadigi
+  // icin onDidChangeConfiguration da gelmez.
+  const settingsWatcher = vscode.workspace.createFileSystemWatcher('**/.vscode/settings.json');
 
   ctx.subscriptions.push(
     bar,
@@ -1604,6 +1963,7 @@ function activate(ctx) {
     stopBar,
     view,
     watcher,
+    settingsWatcher,
     treeChanged,
     vscode.commands.registerCommand('buildbar.build', cmdBuild),
     // Ayni islerin hata ayiklama ikonlu ikizleri: editor/title ve agac
@@ -1635,6 +1995,9 @@ function activate(ctx) {
     watcher.onDidChange(cmdRefresh),
     watcher.onDidCreate(cmdRefresh),
     watcher.onDidDelete(cmdRefresh),
+    settingsWatcher.onDidChange(cmdRefresh),
+    settingsWatcher.onDidCreate(cmdRefresh),
+    settingsWatcher.onDidDelete(cmdRefresh),
 
     // Gorevi olmayan klasor de dahil her durumda aktif sekmeye gore
     // guncellenir; boylece onceki projenin butonlari ekranda kalmaz.
@@ -1652,8 +2015,7 @@ function activate(ctx) {
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       projectNodes.clear();
       optionNodes.clear();
-      optionsCache.clear();
-      if (active && !vscode.workspace.getWorkspaceFolder(active.uri)) active = undefined;
+      resetProjects(); // workspace disinda kalan aktif proje temizlenir
       if (!active) active = pickInitial();
       render();
       reloadRealTasks().then(render);

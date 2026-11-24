@@ -1,0 +1,18 @@
+{
+  // Ic ice projede ${workspaceFolder} bu repo klasorune cozulur. preLaunchTask
+  // bu reponun tasks.json'inda oldugu icin BuildBar onu (dependsOn zinciriyle)
+  // kendisi kosar, sonra oturumu baslatir.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "uygulamayi calistir",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/uygulama",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "preLaunchTask": "derle"
+    }
+  ]
+}

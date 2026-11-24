@@ -1,0 +1,5 @@
+{
+  // VS Code ic ice klasorlerin settings.json dosyasini okumaz; buildbar.*
+  // ayarlarini BuildBar kendisi okur. Repo tek basina acildiginda da gecerli.
+  "buildbar.cleanTask": "temizle"
+}

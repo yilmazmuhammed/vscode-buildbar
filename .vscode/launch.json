@@ -9,6 +9,15 @@
         "--extensionDevelopmentPath=${workspaceFolder}",
         "${workspaceFolder}/ornek-workspace/demo.code-workspace"
       ]
+    },
+    {
+      "name": "Eklentiyi calistir (tek klasor, icinde repolar)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "${workspaceFolder}/ornek-workspace/repolar"
+      ]
     }
   ]
 }

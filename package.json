@@ -64,7 +64,7 @@
         "command": "buildbar.pickAndBuild",
         "title": "Sec ve derle...",
         "category": "BuildBar",
-        "icon": "$(play)"
+        "icon": "$(chevron-down)"
       },
       {
         "command": "buildbar.stop",
@@ -146,7 +146,7 @@
           "when": "buildbar.hasProject && buildbar.isLaunch"
         },
         {
-          "command": "buildbar.pickTask",
+          "command": "buildbar.pickAndBuild",
           "group": "navigation@-100",
           "when": "buildbar.hasProject"
         }
@@ -289,7 +289,11 @@
           },
           "project": {
             "type": "string",
-            "description": "Workspace klasorunun adi"
+            "description": "Projenin adi"
+          },
+          "folder": {
+            "type": "string",
+            "description": "Ic ice projenin klasoru (workspace klasoru olmayan projeler icin)"
           }
         }
       }
@@ -359,6 +363,14 @@
           "default": "",
           "scope": "resource",
           "description": "Temizle komutunun kosacagi tasks.json gorevinin etiketi (ornegin \"temizle\"). Bu gorev secenek listesinde gosterilmez; Temizle ve 'Temizle ve derle' komutlari onu kosar. CMakePresets projelerinde gerekmez: secili preset icin 'cmake --build --preset X --target clean' kullanilir."
+        },
+        "buildbar.nestedProjectDepth": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 6,
+          "scope": "resource",
+          "description": "Workspace klasorunun kendisi bir proje degilse (ornegin icinde birden fazla repo olan bir klasor acildiysa) alt klasorlerde kac seviye derine kadar proje aranacagi. Kendi tasks.json / launch.json / CMakePresets.json dosyasi olan her alt klasor ayri proje olur; bulunan bir projenin icine inilmez. 0: yalnizca workspace klasorleri proje sayilir."
         }
       }
     }

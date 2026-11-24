@@ -1,0 +1,12 @@
+{
+  // Uc seviye derinde: varsayilan buildbar.nestedProjectDepth (2) ile bulunmaz.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "derin",
+      "type": "shell",
+      "command": "echo derin",
+      "problemMatcher": []
+    }
+  ]
+}

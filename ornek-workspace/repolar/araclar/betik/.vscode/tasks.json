@@ -1,0 +1,36 @@
+{
+  // Iki seviye derinde bir proje (araclar/betik). ${workspaceFolder} bu klasore
+  // cozulur, VS Code'un actigi klasore degil. ${env:...} gibi geri kalan
+  // degiskenleri VS Code kosarken cozer; ${input:...} ic ice projede
+  // desteklenmez (girdi tanimi VS Code'un okumadigi bu dosyada).
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "uret",
+      "detail": "basliklari uret",
+      "type": "shell",
+      "command": "sh",
+      "args": ["${workspaceFolder}/uret.sh", "${env:HOME}"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "sorulu-uret",
+      "detail": "hedefi sorar (ic ice projede desteklenmez)",
+      "type": "shell",
+      "command": "sh",
+      "args": ["${workspaceFolder}/uret.sh", "${input:hedef}"],
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "hedef",
+      "type": "promptString",
+      "description": "Hedef dizin"
+    }
+  ]
+}
