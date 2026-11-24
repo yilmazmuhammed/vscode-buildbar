@@ -9,6 +9,59 @@ kaynak arsivi (`-kaynak.zip`) de konuyordu, git'e gecisle birakildi.
 > extension host eski kodu tutmaya devam eder, ayar tanimlari ise yeni
 > surumden gelir; bu karisik durum tuhaf hatalara yol acar.
 
+## 0.5.0 — 2026-11-24
+
+Icinde birden fazla repo olan tek bir klasor acildiginda da aktif reponun
+butonlari; sec ve derle derle dugmesinin yanindaki acilir oka tasindi;
+listeler alfabetik.
+
+**Eklendi**
+
+- **Tek klasorde birden fazla repo.** VS Code'da File > Open Folder ile
+  icinde repolar olan bir klasor (ornegin `~/workspace`) acildiginda, klasorun
+  kendisinde secenek yoksa alt klasorlerdeki kendi `tasks.json` /
+  `launch.json` / `CMakePresets.json` dosyasi olan her repo ayri bir proje
+  olarak listelenir; aktif proje acik dosyayi iceren en derindeki repodur.
+  Sebep: daha once yalnizca workspace klasorleri proje sayiliyordu; boyle bir
+  klasor acildiginda butonlar hic gorunmuyordu ve repolari tek tek
+  `.code-workspace` dosyasina eklemek gerekiyordu.
+- **`buildbar.nestedProjectDepth`** (varsayilan `2`): kac seviye derine
+  inilecegi; `0` aramayi kapatir. Bulunan bir reponun icine inilmez
+  (vendor'lanmis kutuphaneler ayri proje gibi gorunmesin); acilan klasorun
+  kendisi bir projeyse hic arama yapilmaz, yani tek repo acanlar icin
+  davranis degismedi.
+- Ic ice repolarda VS Code'un okumadigi dosyalarin eksigi kapatildi:
+  `${workspaceFolder}` repo klasorune cozulur ve gorev orada kosar;
+  `dependsOn` BuildBar tarafindan sirayla uygulanir (biri basarisizsa ana
+  gorev kosmaz); repodaki `preLaunchTask` once kosar, launch yapilandirmasi
+  VS Code'a nesne olarak verilir; reponun kendi `.vscode/settings.json`
+  dosyasindaki `buildbar.*` ayarlari gecerlidir. Ic ice repolarda
+  `${input:...}` desteklenmez (uyari verilir); `postDebugTask` de
+  desteklenmez.
+
+**Degisti**
+
+- **Sec ve derle artik derle dugmesinin yanindaki acilir okta.** Editor
+  baslik cubugunda `$(play)`'in hemen sagindaki `$(list-selection)` yerine
+  `$(chevron-down)` var; tiklayinca secenek listesi acilir, secilen secenek
+  secilir ve hemen derlenir (launch yapilandirmasiysa oturum baslar) ve
+  `$(play)`'in yeni varsayilani olur. Sebep: VS Code'da Python dosyasi
+  acikken calistir dugmesinin yanindaki ok ayni sekilde calisiyor; secenek
+  satirlarinin sonundaki kucuk dugmeyi bulmak zordu.
+- **Satir sonu dugmesi kaldirildi.** `☰` listesindeki her satirin sonundaki
+  `$(play)` / `$(debug-alt)` dugmesi artik yok; status bar'daki `☰` yalnizca
+  secer. Sec ve derle icin acilir ok ya da **Sec ve derle...** komutu.
+- **Listeler alfabetik.** Agac ve secenek listeleri ada gore siralanir;
+  sayilar sayi gibi karsilastirilir (`debug-2` < `debug-10`), buyuk/kucuk
+  harf ayrilmaz. `both` modunda once gorevler, sonra yapilandirmalar.
+  Sebep: uzun preset listelerinde aranani bulmak dosya sirasinda zordu.
+  Varsayilan secim (`isDefault` yoksa) eskisi gibi dosyadaki ilk girdi;
+  alfabetik ilk degil.
+
+> VS Code'un yerel acilir menuleri yalnizca `package.json`'da sabit basligi
+> olan komutlari gosterebiliyor; projeye gore degisen gorev adlari oraya
+> konamadigi icin liste VS Code'un secim kutusunda (ust orta) acilir.
+
 ## 0.4.0 — 2026-11-20
 
 Eclipse CDT arac cubugu davranisina yaklasma: derleme durumu ve durdur,
